@@ -1295,53 +1295,86 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
 	}
 
 	private func _addDefaultCertificates() {
-		guard
-			UserDefaults.standard.bool(forKey: "feather.didImportDefaultCertificates") == false,
-			let signingAssetsURL = Bundle.main.url(forResource: "signing-assets", withExtension: nil)
-		else {
+		guard let signingAssetsURL = Bundle.main.url(
+			forResource: "signing-assets",
+			withExtension: nil
+		) else {
+			Logger.misc.error("Bundled signing-assets directory is missing")
 			return
 		}
-		
+
 		do {
 			let folderContents = try FileManager.default.contentsOfDirectory(
 				at: signingAssetsURL,
-				includingPropertiesForKeys: nil,
+				includingPropertiesForKeys: [.isDirectoryKey],
 				options: .skipsHiddenFiles
 			)
-			
-			for folderURL in folderContents {
-				guard folderURL.hasDirectoryPath else { continue }
-				
+
+			// The old implementation trusted a one-shot UserDefaults flag. A
+			// failed import therefore became permanent on that installation.
+			// The provisioning UUID is the real source of truth: if the cert is
+			// in Core Data, skip it; if it is not, repair it on this launch.
+			var existingProfileUUIDs = Set(
+				Storage.shared.getAllCertificates().compactMap {
+					Storage.shared.getProvisionFileDecoded(for: $0)?.UUID
+				}
+			)
+
+			for folderURL in folderContents where folderURL.hasDirectoryPath {
 				let certName = folderURL.lastPathComponent
-				
-				let p12Url = folderURL.appendingPathComponent("cert.p12")
-				let provisionUrl = folderURL.appendingPathComponent("cert.mobileprovision")
-				let passwordUrl = folderURL.appendingPathComponent("cert.txt")
-				
+				let p12URL = folderURL.appendingPathComponent("cert.p12")
+				let provisionURL = folderURL.appendingPathComponent("cert.mobileprovision")
+				let passwordURL = folderURL.appendingPathComponent("cert.txt")
+
 				guard
-					FileManager.default.fileExists(atPath: p12Url.path),
-					FileManager.default.fileExists(atPath: provisionUrl.path),
-					FileManager.default.fileExists(atPath: passwordUrl.path)
+					FileManager.default.fileExists(atPath: p12URL.path),
+					FileManager.default.fileExists(atPath: provisionURL.path),
+					FileManager.default.fileExists(atPath: passwordURL.path)
 				else {
 					Logger.misc.warning("Skipping \(certName): missing required files")
 					continue
 				}
-				
-				let password = try String(contentsOf: passwordUrl, encoding: .utf8)
-				
+
+				guard let decoded = CertificateReader(provisionURL).decoded else {
+					Logger.misc.error("Skipping \(certName): invalid mobileprovision")
+					continue
+				}
+
+				guard !existingProfileUUIDs.contains(decoded.UUID) else {
+					Logger.misc.info("Bundled certificate \(certName) is already imported")
+					continue
+				}
+
+				let password = try String(contentsOf: passwordURL, encoding: .utf8)
+					.trimmingCharacters(in: .whitespacesAndNewlines)
+
+				guard !password.isEmpty else {
+					Logger.misc.error("Skipping \(certName): empty P12 password")
+					continue
+				}
+
+				// Reserve this profile for this launch before the asynchronous
+				// import starts, preventing two bundled entries with the same
+				// provisioning UUID from racing each other.
+				existingProfileUUIDs.insert(decoded.UUID)
+
 				FR.handleCertificateFiles(
-					p12URL: p12Url,
-					provisionURL: provisionUrl,
+					p12URL: p12URL,
+					provisionURL: provisionURL,
 					p12Password: password,
 					certificateName: certName,
 					isDefault: true
-				) { _ in
-					
+				) { error in
+					if let error {
+						Logger.misc.error("Bundled certificate \(certName) import failed: \(error.localizedDescription)")
+					} else {
+						UserDefaults.standard.set(true, forKey: "feather.didImportDefaultCertificates")
+						Logger.misc.info("Bundled certificate \(certName) imported")
+					}
 				}
 			}
-			UserDefaults.standard.set(true, forKey: "feather.didImportDefaultCertificates")
 		} catch {
-			Logger.misc.error("Failed to list signing-assets: \(error)")
+			Logger.misc.error("Failed to list signing-assets: \(error.localizedDescription)")
 		}
 	}
 
