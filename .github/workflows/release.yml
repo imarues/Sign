@@ -58,6 +58,15 @@ jobs:
         run: |
           agvtool new-version -all "$(git rev-list --count HEAD)"
 
+      - name: Verify repaired import source
+        run: |
+          set -euo pipefail
+          grep -F 'existingProfileUUIDs' Feather/FeatherApp.swift
+          grep -F '.trimmingCharacters(in: .whitespacesAndNewlines)' Feather/FeatherApp.swift
+          ! grep -F 'UserDefaults.standard.bool(forKey: "feather.didImportDefaultCertificates") == false' Feather/FeatherApp.swift
+          grep -F '_stageLocalImportsAndPresentChoice(urls)' Feather/Views/Library/LibraryView.swift
+          grep -F 'BatSignPickedApps' Feather/Views/Library/LibraryView.swift
+
       - name: Build (unsigned, iOS device)
         run: |
           make iphoneos
