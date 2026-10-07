@@ -191,21 +191,21 @@ struct LibraryView: View {
 			.sheet(item: $_selectedSigningAppPresenting) { app in
 				SigningView(app: app.base)
 			}
-			.sheet(isPresented: $_isImportingPresenting, onDismiss: _showLocalInstallChoiceIfNeeded) {
-				FileImporterRepresentableView(
-					allowedContentTypes: [.ipa, .tipa],
-					allowsMultipleSelection: true,
-					onDocumentsPicked: { urls in
-						if urls.isEmpty {
-							_pendingLocalImportURLs.removeAll()
-							_isImportingPresenting = false
-							return
-						}
-						_pendingLocalImportURLs = urls
-						_isImportingPresenting = false
-					}
-				)
-				.ignoresSafeArea()
+			.fileImporter(
+				isPresented: $_isImportingPresenting,
+				allowedContentTypes: [.ipa, .tipa],
+				allowsMultipleSelection: true
+			) { result in
+				switch result {
+				case .success(let urls):
+					_stageLocalImportsAndPresentChoice(urls)
+				case .failure(let error):
+					Logger.misc.error("file picker: \(error.localizedDescription, privacy: .public)")
+					UIAlertController.showAlertWithOk(
+						title: "تعذر استيراد التطبيق",
+						message: error.localizedDescription
+					)
+				}
 			}
 			.confirmationDialog(
 				"اختر طريقة التثبيت",
@@ -397,9 +397,59 @@ extension LibraryView {
 		}
 	}
 
-	private func _showLocalInstallChoiceIfNeeded() {
-		guard !_pendingLocalImportURLs.isEmpty else { return }
-		_isLocalInstallChoicePresenting = true
+	@MainActor
+	private func _stageLocalImportsAndPresentChoice(_ urls: [URL]) {
+		_pendingLocalImportURLs.removeAll()
+		guard !urls.isEmpty else { return }
+
+		let fm = FileManager.default
+		let stagingRoot = fm.temporaryDirectory
+			.appendingPathComponent("BatSignPickedApps", isDirectory: true)
+
+		do {
+			try fm.createDirectory(at: stagingRoot, withIntermediateDirectories: true)
+		} catch {
+			UIAlertController.showAlertWithOk(
+				title: "تعذر استيراد التطبيق",
+				message: error.localizedDescription
+			)
+			return
+		}
+
+		var staged: [URL] = []
+		for source in urls {
+			let scoped = source.startAccessingSecurityScopedResource()
+			defer {
+				if scoped { source.stopAccessingSecurityScopedResource() }
+			}
+
+			do {
+				let ext = source.pathExtension.isEmpty ? "ipa" : source.pathExtension
+				let destination = stagingRoot
+					.appendingPathComponent(UUID().uuidString)
+					.appendingPathExtension(ext)
+				try fm.copyItem(at: source, to: destination)
+				staged.append(destination)
+			} catch {
+				Logger.misc.error(
+					"import staging: \(source.lastPathComponent, privacy: .public) — \(error.localizedDescription, privacy: .public)"
+				)
+				UIAlertController.showAlertWithOk(
+					title: "تعذر استيراد التطبيق",
+					message: "تعذر تجهيز \(source.lastPathComponent): \(error.localizedDescription)"
+				)
+			}
+		}
+
+		_pendingLocalImportURLs = staged
+		guard !staged.isEmpty else { return }
+
+		// The native fileImporter has already handed us the result. Move the
+		// confirmation to the next main run-loop turn so it never competes
+		// with the document picker's dismissal, without an arbitrary delay.
+		DispatchQueue.main.async {
+			_isLocalInstallChoicePresenting = true
+		}
 	}
 
 	private func _startPendingLocalImports(duplicate: Bool) {
