@@ -1295,53 +1295,101 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
 	}
 
 	private func _addDefaultCertificates() {
-		guard
-			UserDefaults.standard.bool(forKey: "feather.didImportDefaultCertificates") == false,
-			let signingAssetsURL = Bundle.main.url(forResource: "signing-assets", withExtension: nil)
-		else {
+		struct BundledCertificate {
+			let name: String
+			let p12: URL
+			let provision: URL
+			let password: URL
+		}
+
+		let fm = FileManager.default
+		var candidates: [BundledCertificate] = []
+
+		// Preferred layout: signing-assets/<name>/cert.*
+		if let signingAssetsURL = Bundle.main.url(forResource: "signing-assets", withExtension: nil),
+		   let folders = try? fm.contentsOfDirectory(
+			at: signingAssetsURL,
+			includingPropertiesForKeys: [.isDirectoryKey],
+			options: .skipsHiddenFiles
+		   ) {
+			for folder in folders where folder.hasDirectoryPath {
+				let p12 = folder.appendingPathComponent("cert.p12")
+				let provision = folder.appendingPathComponent("cert.mobileprovision")
+				let password = folder.appendingPathComponent("cert.txt")
+				guard fm.fileExists(atPath: p12.path),
+				      fm.fileExists(atPath: provision.path),
+				      fm.fileExists(atPath: password.path) else { continue }
+				candidates.append(.init(
+					name: folder.lastPathComponent,
+					p12: p12,
+					provision: provision,
+					password: password
+				))
+			}
+		}
+
+		// Current Xcode synchronized-group layout: the three files are flattened
+		// into the root of BatSign.app. The shipped IPA uses this layout today.
+		if candidates.isEmpty,
+		   let p12 = Bundle.main.url(forResource: "cert", withExtension: "p12"),
+		   let provision = Bundle.main.url(forResource: "cert", withExtension: "mobileprovision"),
+		   let password = Bundle.main.url(forResource: "cert", withExtension: "txt") {
+			candidates.append(.init(
+				name: "iKiraPlus",
+				p12: p12,
+				provision: provision,
+				password: password
+			))
+		}
+
+		guard !candidates.isEmpty else {
+			Logger.misc.warning("No bundled signing certificate assets were found")
 			return
 		}
-		
-		do {
-			let folderContents = try FileManager.default.contentsOfDirectory(
-				at: signingAssetsURL,
-				includingPropertiesForKeys: nil,
-				options: .skipsHiddenFiles
-			)
-			
-			for folderURL in folderContents {
-				guard folderURL.hasDirectoryPath else { continue }
-				
-				let certName = folderURL.lastPathComponent
-				
-				let p12Url = folderURL.appendingPathComponent("cert.p12")
-				let provisionUrl = folderURL.appendingPathComponent("cert.mobileprovision")
-				let passwordUrl = folderURL.appendingPathComponent("cert.txt")
-				
-				guard
-					FileManager.default.fileExists(atPath: p12Url.path),
-					FileManager.default.fileExists(atPath: provisionUrl.path),
-					FileManager.default.fileExists(atPath: passwordUrl.path)
-				else {
-					Logger.misc.warning("Skipping \(certName): missing required files")
-					continue
-				}
-				
-				let password = try String(contentsOf: passwordUrl, encoding: .utf8)
-				
-				FR.handleCertificateFiles(
-					p12URL: p12Url,
-					provisionURL: provisionUrl,
-					p12Password: password,
-					certificateName: certName,
-					isDefault: true
-				) { _ in
-					
+
+		// Do not use the old one-shot UserDefaults gate. If a previous import
+		// failed, the next launch must repair it. A profile UUID is the stable
+		// identity and prevents duplicates when the certificate already exists.
+		var existingProfileUUIDs = Set(
+			Storage.shared.getAllCertificates().compactMap {
+				Storage.shared.getProvisionFileDecoded(for: $0)?.UUID
+			}
+		)
+
+		for candidate in candidates {
+			guard let decoded = CertificateReader(candidate.provision).decoded else {
+				Logger.misc.error("Bundled certificate \(candidate.name, privacy: .public) has an invalid provisioning profile")
+				continue
+			}
+			guard !existingProfileUUIDs.contains(decoded.UUID) else { continue }
+
+			let rawPassword = (try? String(contentsOf: candidate.password, encoding: .utf8)) ?? ""
+			let password = rawPassword.trimmingCharacters(in: .whitespacesAndNewlines)
+
+			guard FR.checkPasswordForCertificate(
+				for: candidate.p12,
+				with: password,
+				using: candidate.provision
+			) else {
+				Logger.misc.error("Bundled certificate \(candidate.name, privacy: .public) has an invalid P12 password")
+				continue
+			}
+
+			existingProfileUUIDs.insert(decoded.UUID)
+			FR.handleCertificateFiles(
+				p12URL: candidate.p12,
+				provisionURL: candidate.provision,
+				p12Password: password,
+				certificateName: candidate.name,
+				isDefault: true
+			) { error in
+				if let error {
+					Logger.misc.error("Bundled certificate import failed: \(error.localizedDescription, privacy: .public)")
+				} else {
+					UserDefaults.standard.set(true, forKey: "feather.didImportDefaultCertificates")
+					Logger.misc.info("Bundled certificate \(candidate.name, privacy: .public) imported")
 				}
 			}
-			UserDefaults.standard.set(true, forKey: "feather.didImportDefaultCertificates")
-		} catch {
-			Logger.misc.error("Failed to list signing-assets: \(error)")
 		}
 	}
 

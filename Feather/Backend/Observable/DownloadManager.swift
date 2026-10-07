@@ -1204,17 +1204,17 @@ class DownloadManager: NSObject, ObservableObject {
 
 extension DownloadManager: URLSessionDownloadDelegate {
 
-	func handlePachageFile(url: URL, dl: Download) throws {
+	func handlePachageFile(
+		url: URL,
+		dl: Download,
+		completion: ((Error?) -> Void)? = nil
+	) throws {
 		Self.log.notice("download: handing \(dl.id.prefix(8), privacy: .public) to the importer — \(url.lastPathComponent, privacy: .public)")
 		FR.handlePackageFile(url, download: dl) { err in
 			if err != nil {
 				let generator = UINotificationFeedbackGenerator()
 				generator.notificationOccurred(.error)
 
-				// The package arrived and could not be opened. That is a download
-				// that ends with no app in the Library, which is the same
-				// disappointment as a failed transfer — and it is reported the
-				// same way, with the importer's own reason.
 				DispatchQueue.main.async {
 					DownloadManager.shared._fail(
 						dl,
@@ -1222,31 +1222,24 @@ extension DownloadManager: URLSessionDownloadDelegate {
 					)
 				}
 			} else {
-			// An update is re-signed and re-installed the same way a first
-			// install is, and it is named as the phase that exists for it: the
-			// user tapped "Update" on an app they already have, and the card
-			// says which of the two jobs this is. The transfer's own id is what
-			// says so — the id the updater starts its downloads under, and the
-			// one a manual update shares with it now.
-			let isUpdate = dl.id.hasPrefix(BatSignAuto.downloadPrefix)
-				|| dl.id.hasPrefix(BatSignAuto.manualUpdatePrefix)
-			LiveStatus.update(
-				phase: isUpdate ? .updating : .signing,
-				appName: dl.cardName,
-				progress: 0,
-				detail: isUpdate ? "Updating" : "Signing and installing",
-				// Signing has no fraction of its own, and a zero handed over
-				// without saying so is a zero the island may print.
-				progressKnown: false,
-				force: true,
-				appID: dl.liveID,
-				mode: CompressionMode.stored.label
-			)
+				let isUpdate = dl.id.hasPrefix(BatSignAuto.downloadPrefix)
+					|| dl.id.hasPrefix(BatSignAuto.manualUpdatePrefix)
+				LiveStatus.update(
+					phase: isUpdate ? .updating : .signing,
+					appName: dl.cardName,
+					progress: 0,
+					detail: isUpdate ? "Updating" : "Signing and installing",
+					progressKnown: false,
+					force: true,
+					appID: dl.liveID,
+					mode: CompressionMode.stored.label
+				)
 			}
 
 			DispatchQueue.main.async {
 				DownloadManager.shared._removeProgressNotification(for: dl)
 				DownloadManager.shared._drop(dl)
+				completion?(err)
 			}
 		}
 	}

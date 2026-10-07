@@ -29,6 +29,7 @@ struct LibraryView: View {
 	@State private var _selectedInstallAppPresenting: AnyApp?
 	@State private var _isImportingPresenting = false
 	@State private var _isDownloadingPresenting = false
+	@State private var _pendingLocalDuplicate = false
 	/// Whether the Add App sheet — the two ways in — is up.
 	@State private var _isAddChoicePresenting = false
 	/// The way in the sheet picked; opened once the sheet is fully gone, since
@@ -158,9 +159,28 @@ struct LibraryView: View {
 					}
 				}
 				ToolbarItem(placement: .topBarTrailing) {
-					Button {
-						BSHaptics.tap()
-						_isAddChoicePresenting = true
+					Menu {
+						Menu {
+							Button("تحميل وتثبيت مباشر") {
+								BSHaptics.tap()
+								_pendingLocalDuplicate = false
+								_isImportingPresenting = true
+							}
+							Button("تحميل وتثبيت مكرر") {
+								BSHaptics.tap()
+								_pendingLocalDuplicate = true
+								_isImportingPresenting = true
+							}
+						} label: {
+							Label("استيراد من الملفات", systemImage: "folder")
+						}
+
+						Button {
+							BSHaptics.tap()
+							_isDownloadingPresenting = true
+						} label: {
+							Label("استيراد من رابط", systemImage: "link")
+						}
 					} label: {
 						HStack(spacing: 6) {
 							Image(systemName: "plus")
@@ -170,12 +190,6 @@ struct LibraryView: View {
 					}
 					.accessibilityLabel("إضافة تطبيق")
 				}
-			}
-			.sheet(isPresented: $_isAddChoicePresenting, onDismiss: _openPendingImport) {
-				_addAppSheet()
-					.presentationDetents([.height(250)])
-					.presentationDragIndicator(.visible)
-					.modifier(BSSheetGround(color: BS.screen))
 			}
 			.refreshable {
 				await _checkForUpdates()
@@ -191,38 +205,22 @@ struct LibraryView: View {
 			.sheet(item: $_selectedSigningAppPresenting) { app in
 				SigningView(app: app.base)
 			}
-			.sheet(isPresented: $_isImportingPresenting, onDismiss: _showLocalInstallChoiceIfNeeded) {
-				FileImporterRepresentableView(
-					allowedContentTypes: [.ipa, .tipa],
-					allowsMultipleSelection: true,
-					onDocumentsPicked: { urls in
-						if urls.isEmpty {
-							_pendingLocalImportURLs.removeAll()
-							_isImportingPresenting = false
-							return
-						}
-						_pendingLocalImportURLs = urls
-						_isImportingPresenting = false
-					}
-				)
-				.ignoresSafeArea()
-			}
-			.confirmationDialog(
-				"اختر طريقة التثبيت",
-				isPresented: $_isLocalInstallChoicePresenting,
-				titleVisibility: .visible
-			) {
-				Button("تحميل وتثبيت مباشر") {
-					_startPendingLocalImports(duplicate: false)
+			.fileImporter(
+				isPresented: $_isImportingPresenting,
+				allowedContentTypes: [.ipa, .tipa],
+				allowsMultipleSelection: true
+			) { result in
+				switch result {
+				case .success(let urls):
+					guard !urls.isEmpty else { return }
+					_startLocalImports(urls, duplicate: _pendingLocalDuplicate)
+				case .failure(let error):
+					Logger.misc.error("file picker: \(error.localizedDescription, privacy: .public)")
+					UIAlertController.showAlertWithOk(
+						title: "تعذر استيراد التطبيق",
+						message: error.localizedDescription
+					)
 				}
-				Button("تحميل وتثبيت مكرر") {
-					_startPendingLocalImports(duplicate: true)
-				}
-				Button("إلغاء", role: .cancel) {
-					_discardPendingLocalImports()
-				}
-			} message: {
-				Text("التثبيت المكرر يغيّر معرّف Bundle بإضافة حرفين أو رقمين عشوائيين حتى يمكن تثبيت النسخة بجانب الأصلية.")
 			}
 			.alert("استيراد من رابط", isPresented: $_isDownloadingPresenting) {
 				TextField("الرابط", text: $_alertDownloadString)
@@ -400,6 +398,46 @@ extension LibraryView {
 	private func _showLocalInstallChoiceIfNeeded() {
 		guard !_pendingLocalImportURLs.isEmpty else { return }
 		_isLocalInstallChoicePresenting = true
+	}
+
+	private func _startLocalImports(_ urls: [URL], duplicate: Bool) {
+		for url in urls {
+			// A Files-provider URL is only guaranteed while its security scope is
+			// held. Keep that scope until AppFileHandler has copied, unpacked and
+			// committed the app, not merely until this button action returns.
+			let scoped = url.startAccessingSecurityScopedResource()
+
+			let id: String
+			if duplicate {
+				id = "BatSignDuplicate_\(Self._randomBundleSuffix())_\(UUID().uuidString)"
+			} else {
+				id = "BatSignDirect_\(UUID().uuidString)"
+			}
+
+			let dl = downloadManager.startArchive(from: url, id: id)
+			do {
+				try downloadManager.handlePachageFile(url: url, dl: dl) { error in
+					if scoped { url.stopAccessingSecurityScopedResource() }
+					guard let error else { return }
+					Logger.misc.error(
+						"import: \(url.lastPathComponent, privacy: .public) — \(error.localizedDescription, privacy: .public)"
+					)
+					UIAlertController.showAlertWithOk(
+						title: "تعذر استيراد التطبيق",
+						message: "تعذر استيراد \(url.lastPathComponent): \(error.localizedDescription)"
+					)
+				}
+			} catch {
+				if scoped { url.stopAccessingSecurityScopedResource() }
+				Logger.misc.error(
+					"import: \(url.lastPathComponent, privacy: .public) — \(error.localizedDescription, privacy: .public)"
+				)
+				UIAlertController.showAlertWithOk(
+					title: "تعذر استيراد التطبيق",
+					message: "تعذر استيراد \(url.lastPathComponent): \(error.localizedDescription)"
+				)
+			}
+		}
 	}
 
 	private func _startPendingLocalImports(duplicate: Bool) {
