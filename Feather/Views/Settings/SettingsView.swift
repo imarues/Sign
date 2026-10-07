@@ -4,20 +4,6 @@
 //
 //  BatSign's settings.
 //
-//  Two things about this screen are deliberate.
-//
-//  * Every icon is ours. Not a system symbol, not a near-copy of one — the
-//    tiles are drawn from `BSGlyph`, in this app, at one weight. A settings
-//    list is the one place a user sees twenty icons at once, and twenty
-//    borrowed drawings from four different symbol families is what makes an app
-//    feel assembled rather than made.
-//
-//  * Nothing is layered. On iOS 26 and later a `Form` is already Liquid Glass —
-//    the system draws the grouped cards, the separators and the edge effects —
-//    so the only correct thing to do here is get out of its way. An extra
-//    material under a row, or a tint over it, is a layer on top of glass, and
-//    two glasses stacked read as neither.
-//
 
 import SwiftUI
 import NimbleViews
@@ -25,11 +11,6 @@ import UIKit
 import IDeviceSwift
 
 // MARK: - Rows
-
-/// A settings row's label: the tile and its title.
-///
-/// One shape for every row in the app, so the tiles line up down the screen
-/// instead of drifting a point or two per section.
 struct BSRowLabel: View {
 	let glyph: BSGlyph
 	var tint: Color = BS.accent
@@ -43,45 +24,7 @@ struct BSRowLabel: View {
 	}
 }
 
-/// The screen's header: the mark, the name, and who made it.
-///
-/// The bat is the whole point of it. It is the same drawing the Dynamic Island
-/// shows while a job runs, so the app and the island are recognisably the same
-/// thing.
-private struct BSProfileHeader: View {
-	var body: some View {
-		HStack(spacing: 16) {
-			BatBadge(size: 46)
-
-			VStack(alignment: .leading, spacing: 3) {
-				Text("BatSign")
-					.font(.title2.weight(.bold))
-				// One line, shrunk rather than wrapped: the version pill beside it
-				// is fixed width, and a two-line subtitle in a header row reads as
-				// a layout that gave up.
-				Text(verbatim: "Made By @ihateios")
-					.font(.subheadline)
-					.foregroundStyle(.secondary)
-					.lineLimit(1)
-					.minimumScaleFactor(0.75)
-			}
-			.layoutPriority(1)
-
-			Spacer(minLength: 8)
-
-			Text(verbatim: Bundle.main.version)
-				.font(.caption.weight(.bold))
-				.foregroundStyle(.secondary)
-				.padding(.horizontal, 9)
-				.padding(.vertical, 4)
-				.background(Capsule().fill(Color.primary.opacity(0.07)))
-		}
-		.padding(.vertical, 8)
-	}
-}
-
 // MARK: - View
-
 struct SettingsView: View {
 	@ObservedObject private var _pending = BSPendingSign.shared
 	@AppStorage("BatSign.autoDeleteOldVersions") private var _autoDeleteOldVersions: Bool = true
@@ -91,11 +34,9 @@ struct SettingsView: View {
 	@StateObject private var autoUpdateManager = AutoUpdateManager.shared
 	@StateObject private var autoSignManager = AutoSignManager.shared
 
-	// MARK: Body
 	var body: some View {
 		NBNavigationView(.localized("Settings")) {
 			Form {
-				_profile()
 				_general()
 				_appearance()
 				_signing()
@@ -104,7 +45,6 @@ struct SettingsView: View {
 				_privacy()
 				_files()
 				_danger()
-				_footer()
 			}
 			.environment(\.defaultMinListRowHeight, 44)
 		}
@@ -113,15 +53,6 @@ struct SettingsView: View {
 
 // MARK: - Sections
 extension SettingsView {
-	@ViewBuilder
-	private func _profile() -> some View {
-		Section {
-			NavigationLink(destination: AboutView()) {
-				BSProfileHeader()
-			}
-		}
-	}
-
 	@ViewBuilder
 	private func _general() -> some View {
 		Section {
@@ -171,10 +102,6 @@ extension SettingsView {
 		} header: {
 			Text(.localized("Signing"))
 		} footer: {
-			// The mode is named here because it is what the Dynamic Island reports
-			// while a job runs: a Turbo package takes its time being built and
-			// installs quickly, and knowing which one is running is the difference
-			// between a correct wait and a stall.
 			Text(.localized("Fine-tune how apps are installed, compressed and modified. The compression mode you pick is what the Live Activity shows while a job runs."))
 		}
 	}
@@ -220,27 +147,25 @@ extension SettingsView {
 				Text(.localized("Night Only")).tag(true)
 			} label: {
 				BSRowLabel(glyph: .moon, tint: .purple, title: "Active Window")
-			}				// Which of the two systems runs. Above the switch it qualifies,
-				// because this is the choice and the switches below are the
-				// details: one signs each app the moment it lands, the other
-				// holds them until the person says go.
-				Picker(selection: Binding(
-					get: { _pending.mode },
-					set: { _pending.setMode($0) }
-				)) {
-					ForEach(BSSigningMode.allCases) { mode in
-						Text(.localized(mode.title)).tag(mode)
-					}
-				} label: {
-					BSRowLabel(glyph: .install, tint: .blue, title: "When Apps Arrive")
-				}
+			}
 
-				Toggle(isOn: Binding(
-					get: { autoSignManager.isAutoSignEnabled },
-					set: { autoSignManager.isAutoSignEnabled = $0 }
-				)) {
-					BSRowLabel(glyph: .quill, tint: .green, title: "Auto-Sign Imported Apps")
+			Picker(selection: Binding(
+				get: { _pending.mode },
+				set: { _pending.setMode($0) }
+			)) {
+				ForEach(BSSigningMode.allCases) { mode in
+					Text(.localized(mode.title)).tag(mode)
 				}
+			} label: {
+				BSRowLabel(glyph: .install, tint: .blue, title: "When Apps Arrive")
+			}
+
+			Toggle(isOn: Binding(
+				get: { autoSignManager.isAutoSignEnabled },
+				set: { autoSignManager.isAutoSignEnabled = $0 }
+			)) {
+				BSRowLabel(glyph: .quill, tint: .green, title: "Auto-Sign Imported Apps")
+			}
 
 			Toggle(isOn: Binding(
 				get: { autoUpdateManager.isAutoRenewEnabled },
@@ -260,9 +185,10 @@ extension SettingsView {
 				BSRowLabel(glyph: .swap, tint: .orange, title: "Replace Old Versions")
 			}
 		} header: {
-			Text(.localized("Automation"))			} footer: {
-				Text(.localized("One at a Time signs each app the moment it finishes downloading or importing — the default. Collect, Then Sign Together holds arriving apps in a tray instead, and they all sign as one run once you confirm. Automatic updates still sign themselves either way. An app you tap to sign is always signed immediately."))
-			}
+			Text(.localized("Automation"))
+		} footer: {
+			Text(.localized("One at a Time signs each app the moment it finishes downloading or importing — the default. Collect, Then Sign Together holds arriving apps in a tray instead, and they all sign as one run once you confirm. Automatic updates still sign themselves either way. An app you tap to sign is always signed immediately."))
+		}
 	}
 
 	@ViewBuilder
@@ -343,24 +269,6 @@ extension SettingsView {
 						.foregroundStyle(.red)
 				}
 			}
-		}
-	}
-
-	@ViewBuilder
-	private func _footer() -> some View {
-		Section {
-			HStack {
-				Spacer()
-				VStack(spacing: 4) {
-					BatBadge(size: 20)
-					Text(verbatim: "BatSign \(Bundle.main.version) • Made By @ihateios")
-						.font(.footnote)
-						.foregroundStyle(.tertiary)
-				}
-				Spacer()
-			}
-			.listRowBackground(Color.clear)
-			.listRowSeparator(.hidden)
 		}
 	}
 }
