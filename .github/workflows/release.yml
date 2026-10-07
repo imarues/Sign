@@ -62,6 +62,18 @@ jobs:
         run: |
           make iphoneos
 
+      - name: Verify signing assets inside IPA
+        run: |
+          set -euo pipefail
+          IPA="packages/BatSign.ipa"
+          BASE="Payload/BatSign.app/signing-assets/iKiraPlus"
+          unzip -Z1 "$IPA" | grep -Fx "$BASE/cert.p12"
+          unzip -Z1 "$IPA" | grep -Fx "$BASE/cert.mobileprovision"
+          unzip -Z1 "$IPA" | grep -Fx "$BASE/cert.txt"
+          test "$(unzip -p "$IPA" "$BASE/cert.txt")" = "$(tr -d '\r\n' < Feather/signing-assets/iKiraPlus/cert.txt)"
+          test -n "$(unzip -p "$IPA" "$BASE/cert.txt")"
+          echo "Verified exact signing-assets directory and normalized password in IPA"
+
       - name: Package IPA
         run: |
           ls -la packages/
