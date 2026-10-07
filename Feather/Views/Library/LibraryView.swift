@@ -191,13 +191,17 @@ struct LibraryView: View {
 			.sheet(item: $_selectedSigningAppPresenting) { app in
 				SigningView(app: app.base)
 			}
-			.sheet(isPresented: $_isImportingPresenting, onDismiss: _presentPendingLocalInstallChoice) {
+			.sheet(isPresented: $_isImportingPresenting, onDismiss: _showLocalInstallChoiceIfNeeded) {
 				FileImporterRepresentableView(
 					allowedContentTypes: [.ipa, .tipa],
 					allowsMultipleSelection: true,
 					onDocumentsPicked: { urls in
-						guard !urls.isEmpty else { return }
-						_stageLocalImports(urls)
+						if urls.isEmpty {
+							_pendingLocalImportURLs.removeAll()
+							_isImportingPresenting = false
+							return
+						}
+						_pendingLocalImportURLs = urls
 						_isImportingPresenting = false
 					}
 				)
@@ -208,10 +212,10 @@ struct LibraryView: View {
 				isPresented: $_isLocalInstallChoicePresenting,
 				titleVisibility: .visible
 			) {
-				Button("تثبيت مباشر") {
+				Button("تحميل وتثبيت مباشر") {
 					_startPendingLocalImports(duplicate: false)
 				}
-				Button("تثبيت مكرر") {
+				Button("تحميل وتثبيت مكرر") {
 					_startPendingLocalImports(duplicate: true)
 				}
 				Button("إلغاء", role: .cancel) {
@@ -385,8 +389,7 @@ extension LibraryView {
 	private func _openPendingImport() {
 		guard let kind = _pendingImport else { return }
 		_pendingImport = nil
-		Task { @MainActor in
-			try? await Task.sleep(nanoseconds: 450_000_000)
+		DispatchQueue.main.async {
 			switch kind {
 			case .files: _isImportingPresenting = true
 			case .url: _isDownloadingPresenting = true
@@ -394,51 +397,9 @@ extension LibraryView {
 		}
 	}
 
-	/// Copy a provider-owned file while its security scope is still valid.
-	/// The actual import waits until the user chooses direct or duplicate.
-	private func _stageLocalImports(_ urls: [URL]) {
-		_discardPendingLocalImports()
-
-		let fm = FileManager.default
-		var staged: [URL] = []
-
-		for source in urls {
-			do {
-				let scoped = source.startAccessingSecurityScopedResource()
-				defer {
-					if scoped { source.stopAccessingSecurityScopedResource() }
-				}
-
-				let ext = source.pathExtension.isEmpty ? "ipa" : source.pathExtension
-				let destination = fm.temporaryDirectory
-					.appendingPathComponent("FeatherImport_Choice_\(UUID().uuidString)")
-					.appendingPathExtension(ext)
-
-				if fm.fileExists(atPath: destination.path) {
-					try fm.removeItem(at: destination)
-				}
-				try fm.copyItem(at: source, to: destination)
-				staged.append(destination)
-			} catch {
-				Logger.misc.error(
-					"import staging: \(source.lastPathComponent, privacy: .public) — \(error.localizedDescription, privacy: .public)"
-				)
-				UIAlertController.showAlertWithOk(
-					title: "تعذر استيراد التطبيق",
-					message: "تعذر تجهيز \(source.lastPathComponent): \(error.localizedDescription)"
-				)
-			}
-		}
-
-		_pendingLocalImportURLs = staged
-	}
-
-	private func _presentPendingLocalInstallChoice() {
+	private func _showLocalInstallChoiceIfNeeded() {
 		guard !_pendingLocalImportURLs.isEmpty else { return }
-		Task { @MainActor in
-			try? await Task.sleep(nanoseconds: 250_000_000)
-			_isLocalInstallChoicePresenting = true
-		}
+		_isLocalInstallChoicePresenting = true
 	}
 
 	private func _startPendingLocalImports(duplicate: Bool) {
@@ -687,7 +648,7 @@ extension LibraryView {
 			}
 			.frame(minWidth: 68, minHeight: 30)
 		} else {
-			WSActionButton(title: "Get", systemImage: "arrow.down.circle") {
+			WSActionButton(title: "تحميل", systemImage: "arrow.down.circle") {
 				if autoSignManager.isAutoSignEnabled {
 					UIImpactFeedbackGenerator(style: .medium).impactOccurred()
 					AutoSignManager.shared.enqueue(app: app, reason: .autoSign)

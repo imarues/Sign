@@ -197,16 +197,30 @@ struct BSAppList: View {
 					}
 					.buttonStyle(.plain)
 				} else {
-					NavigationLink {
-						SourceAppsDetailView(
-							sourceURL: item.sourceURL,
-							source: item.source,
-							app: item.app
-						)
-					} label: {
-						BSAppRow(item: item)
+					HStack(spacing: 0) {
+						NavigationLink {
+							SourceAppsDetailView(
+								sourceURL: item.sourceURL,
+								source: item.source,
+								app: item.app
+							)
+						} label: {
+							BSStoreRow(
+								storedSource: item.storedSource,
+								sourceURL: item.sourceURL,
+								repository: item.source,
+								app: item.app,
+								showsSeparator: false,
+								showsChevron: false,
+								showsPill: false
+							)
+						}
+						.buttonStyle(.plain)
+						.frame(maxWidth: .infinity)
+
+						BSGetPill(sourceURL: item.sourceURL, repository: item.source, app: item.app)
+							.padding(.trailing, 16)
 					}
-					.buttonStyle(.plain)
 				}
 
 				if index < items.count - 1 {

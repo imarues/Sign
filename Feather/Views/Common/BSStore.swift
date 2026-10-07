@@ -479,7 +479,7 @@ enum BSPillState: Equatable {
 	/// from the word rather than from a fixed frame.
 	var label: String {
 		switch self {
-		case .get: return "GET"
+		case .get: return "تحميل"
 		case .signing: return ""
 		case .installing: return ""
 		case .downloading: return ""
@@ -533,6 +533,7 @@ struct BSGetPill: View {
 	/// an install is plausibly running.
 	@State private var installFraction: Double?
 	@State private var presentingInstall: Signed?
+	@State private var showInstallChoices = false
 
 	init(
 		sourceURL: URL?,
@@ -692,6 +693,21 @@ struct BSGetPill: View {
 				.contentShape(Capsule())
 		}
 		.buttonStyle(.plain)
+		.confirmationDialog(
+			"اختر طريقة التثبيت",
+			isPresented: $showInstallChoices,
+			titleVisibility: .visible
+		) {
+			Button("تحميل وتثبيت مباشر") {
+				_startInstall(duplicate: false)
+			}
+			Button("تحميل وتثبيت مكرر") {
+				_startInstall(duplicate: true)
+			}
+			Button("إلغاء", role: .cancel) { }
+		} message: {
+			Text("التثبيت المكرر يغيّر معرّف Bundle بإضافة حرفين أو رقمين عشوائيين حتى يمكن تثبيت النسخة بجانب الأصلية.")
+		}
 		.disabled(state == .unavailable || state == .signing)
 		.animation(.spring(response: 0.3, dampingFraction: 0.8), value: state)
 		.sheet(item: $presentingInstall) { signed in
@@ -751,14 +767,7 @@ struct BSGetPill: View {
 		BSHaptics.tap()
 		switch state {
 		case .get:
-			guard let url = app.currentDownloadUrl else { return }
-			_ = downloadManager.startDownload(
-				from: url,
-				id: app.currentUniqueId,
-				bundleID: app.id,
-				sourceProvenance: _provenance(),
-				expectedBytes: app.size ?? 0
-			)
+			showInstallChoices = true
 		case .downloading:
 			// The ring is a stop button: tapping a running transfer cancels it
 			// and the pill falls back to GET.
@@ -772,6 +781,31 @@ struct BSGetPill: View {
 		case .signing, .unavailable:
 			break
 		}
+	}
+
+	private func _startInstall(duplicate: Bool) {
+		guard let url = app.currentDownloadUrl else { return }
+
+		let id: String
+		if duplicate {
+			id = "BatSignDuplicate_\(Self._randomBundleSuffix())_\(app.currentUniqueId)"
+		} else {
+			id = "BatSignDirect_\(app.currentUniqueId)"
+		}
+
+		_ = downloadManager.startDownload(
+			from: url,
+			id: id,
+			bundleID: app.id,
+			displayName: app.currentName,
+			sourceProvenance: _provenance(),
+			expectedBytes: app.size ?? 0
+		)
+	}
+
+	private static func _randomBundleSuffix() -> String {
+		let alphabet = Array("abcdefghijklmnopqrstuvwxyz0123456789")
+		return String((0..<2).compactMap { _ in alphabet.randomElement() })
 	}
 
 	// MARK: Install probe
