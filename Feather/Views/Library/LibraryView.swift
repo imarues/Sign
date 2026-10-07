@@ -37,6 +37,12 @@ struct LibraryView: View {
 	@State private var _pendingImport: _PendingImport?
 	@State private var _alertDownloadString = ""
 
+	/// Files selected from the Files picker are copied into app-owned temporary
+	/// storage before the picker closes. That lets us ask which install mode the
+	/// user wants without losing the document provider's security-scoped access.
+	@State private var _pendingLocalImportURLs: [URL] = []
+	@State private var _isLocalInstallChoicePresenting = false
+
 	@State private var _searchText = ""
 	@State private var _selectedScope: Scope = .all
 
@@ -86,101 +92,91 @@ struct LibraryView: View {
 	// MARK: Body
 	var body: some View {
 		NavigationStack {
-				ScrollView {						VStack(alignment: .leading, spacing: 22) {								// What has arrived and is waiting to be signed, above the list it
-								// is waiting in. Absent on the one-at-a-time system, because
-								// then there is never anything waiting.
-								BSPendingSignStrip()
+			ScrollView {
+				VStack(alignment: .leading, spacing: 22) {
+					// What has arrived and is waiting to be signed, above the list it
+					// is waiting in. Absent on the one-at-a-time system, because
+					// then there is never anything waiting.
+					BSPendingSignStrip()
 
-								// The run, above the list it was picked from: one button, several
-								// apps, and this is where it says how far it has got.
-								BSBulkSignStrip()
+					// The run, above the list it was picked from: one button, several
+					// apps, and this is where it says how far it has got.
+					BSBulkSignStrip()
 
-							Text(_countText.uppercased())
-							.font(BSStore.eyebrowFont)
-							.foregroundStyle(BSStore.secondary)
-							.frame(maxWidth: .infinity, alignment: .leading)
+					Text(_countText.uppercased())
+						.font(BSStore.eyebrowFont)
+						.foregroundStyle(BSStore.secondary)
+						.frame(maxWidth: .infinity, alignment: .leading)
 
-						_searchBar()
-						if _showSigned && !_filteredSigned.isEmpty {
-							_appSection(title: "Installed", apps: _filteredSigned)
-						}
-
-						if _showImported && !_filteredImported.isEmpty {
-							_appSection(title: "Ready to Install", apps: _filteredImported)
-						}
-
-						if _isCompletelyEmpty {
-							_emptyCard()
-						}
+					_searchBar()
+					if _showSigned && !_filteredSigned.isEmpty {
+						_appSection(title: "Installed", apps: _filteredSigned)
 					}
-					.padding(.horizontal, 16)
-					.padding(.top, 4)
-					.padding(.bottom, 28)
-				}					.bsScreen()
-					.bsChrome()
-					// The bar that starts a run sits over the list's own bottom edge, so
-					// the last row is never hidden behind it and the bar is never
-					// scrolled away from the answer it is about to act on.
-					.safeAreaInset(edge: .bottom) {
-						if _isSelecting {
-							BSBulkActionBar(
-								count: _selection.count,
-								title: _bulkTitle,
-								action: _startBulkSign,
-								selectAll: _toggleSelectAll,
-								cancel: _endSelecting
-							)
-						}
+
+					if _showImported && !_filteredImported.isEmpty {
+						_appSection(title: "Ready to Install", apps: _filteredImported)
 					}
-					.animation(.snappy(duration: 0.22), value: _isSelecting)
-				// The word, like every other tab has. The count underneath it is the
-				// eyebrow for the list, not a replacement for the screen's own name —
-				// without this the Library was the one tab that never said what it
-				// was.
-				.navigationTitle(.localized("Library"))
-				.navigationBarTitleDisplayMode(.large)					.toolbar {
-						ToolbarItem(placement: .topBarLeading) {
-							if !_isCompletelyEmpty {
-								// One word, in the corner the system puts it in, for the one mode
-								// this screen has that the others do not.
-								Button(_isSelecting ? "Done" : "Select") {
-									BSHaptics.tap()
-									withAnimation(.snappy(duration: 0.22)) {
-										_isSelecting.toggle()
-										if !_isSelecting { _selection.removeAll() }
-									}
-								}
-								.font(.body.weight(_isSelecting ? .semibold : .regular))
+
+					if _isCompletelyEmpty {
+						_emptyCard()
+					}
+				}
+				.padding(.horizontal, 16)
+				.padding(.top, 4)
+				.padding(.bottom, 28)
+			}
+			.bsScreen()
+			.bsChrome()
+			// The bar that starts a run sits over the list's own bottom edge, so
+			// the last row is never hidden behind it and the bar is never
+			// scrolled away from the answer it is about to act on.
+			.safeAreaInset(edge: .bottom) {
+				if _isSelecting {
+					BSBulkActionBar(
+						count: _selection.count,
+						title: _bulkTitle,
+						action: _startBulkSign,
+						selectAll: _toggleSelectAll,
+						cancel: _endSelecting
+					)
+				}
+			}
+			.animation(.snappy(duration: 0.22), value: _isSelecting)
+			.navigationTitle(.localized("Library"))
+			.navigationBarTitleDisplayMode(.large)
+			.toolbar {
+				ToolbarItem(placement: .topBarLeading) {
+					if !_isCompletelyEmpty {
+						Button(_isSelecting ? "Done" : "Select") {
+							BSHaptics.tap()
+							withAnimation(.snappy(duration: 0.22)) {
+								_isSelecting.toggle()
+								if !_isSelecting { _selection.removeAll() }
 							}
 						}
-						ToolbarItem(placement: .topBarTrailing) {
-							// A button, like the one on Sources, and not a menu: the system
-						// draws its own surface around a toolbar item, and around a *menu*
-						// that surface comes out an oval — the two controls are meant to
-						// be the same circle. The two ways in are asked for in the sheet
-						// the + opens, which also names them in full.
-						BSCornerButton(glyph: .plus, label: "Add App") {
-							_isAddChoicePresenting = true
+						.font(.body.weight(_isSelecting ? .semibold : .regular))
+					}
+				}
+				ToolbarItem(placement: .topBarTrailing) {
+					Button {
+						BSHaptics.tap()
+						_isAddChoicePresenting = true
+					} label: {
+						HStack(spacing: 6) {
+							Image(systemName: "plus")
+							Text("إضافة تطبيق")
 						}
+						.font(.body.weight(.semibold))
 					}
-				}					// A sheet, not a confirmationDialog: the dialog's presentation has
-					// been seen to anchor itself as a floating panel near the top of the
-					// screen on iOS 26 instead of sliding up as the list a user expects.
-					// The sheet is the same list on every iOS and every size class.
-					.sheet(isPresented: $_isAddChoicePresenting, onDismiss: _openPendingImport) {
-							_addAppSheet()
-								.presentationDetents([.height(250)])
-							.presentationDragIndicator(.visible)
-							// One surface, by construction. The sheet's content paints
-							// the app's own ground, but iOS 26 draws a sheet's
-							// presentation chrome — the grabber band above and the
-							// home-indicator band below — on its own material, which
-							// measured darker than the painted ground on both. The
-							// result was three visible surfaces in one small sheet.								// Setting the presentation backdrop to the same colour
-								// makes every zone — top band, content, bottom band — the
-								// same surface, whatever iOS does around it.
-								.modifier(BSSheetGround(color: BS.screen))
-					}
+					.accessibilityLabel("إضافة تطبيق")
+				}
+			}
+			.sheet(isPresented: $_isAddChoicePresenting, onDismiss: _openPendingImport) {
+				_addAppSheet()
+					.presentationDetents([.height(250)])
+					.presentationDragIndicator(.visible)
+					.modifier(BSSheetGround(color: BS.screen))
+			}
 			.refreshable {
 				await _checkForUpdates()
 			}
@@ -195,83 +191,74 @@ struct LibraryView: View {
 			.sheet(item: $_selectedSigningAppPresenting) { app in
 				SigningView(app: app.base)
 			}
-			.sheet(isPresented: $_isImportingPresenting) {
+			.sheet(isPresented: $_isImportingPresenting, onDismiss: _presentPendingLocalInstallChoice) {
 				FileImporterRepresentableView(
 					allowedContentTypes: [.ipa, .tipa],
 					allowsMultipleSelection: true,
 					onDocumentsPicked: { urls in
 						guard !urls.isEmpty else { return }
-						for url in urls {
-							let id = "FeatherManualDownload_\(UUID().uuidString)"
-							let dl = downloadManager.startArchive(from: url, id: id)
-							do {
-								try downloadManager.handlePachageFile(url: url, dl: dl)
-							} catch {
-								// A file that is picked and then produces nothing at
-								// all, with no reason given, is the worst of the
-								// available answers — and this is the only feedback
-								// a local import has.
-								Logger.misc.error(
-									"import: \(url.lastPathComponent, privacy: .public) — \(error.localizedDescription, privacy: .public)"
-								)
-
-								UIAlertController.showAlertWithOk(
-									title: .localized("Import"),
-									message: .localized(
-										"‘%@’ could not be imported: %@",
-										arguments: url.lastPathComponent, error.localizedDescription
-									)
-								)
-							}
-						}
+						_stageLocalImports(urls)
+						_isImportingPresenting = false
 					}
 				)
 				.ignoresSafeArea()
 			}
-			.alert(.localized("Import from URL"), isPresented: $_isDownloadingPresenting) {
-				TextField(.localized("URL"), text: $_alertDownloadString)
+			.confirmationDialog(
+				"اختر طريقة التثبيت",
+				isPresented: $_isLocalInstallChoicePresenting,
+				titleVisibility: .visible
+			) {
+				Button("تثبيت مباشر") {
+					_startPendingLocalImports(duplicate: false)
+				}
+				Button("تثبيت مكرر") {
+					_startPendingLocalImports(duplicate: true)
+				}
+				Button("إلغاء", role: .cancel) {
+					_discardPendingLocalImports()
+				}
+			} message: {
+				Text("التثبيت المكرر يغيّر معرّف Bundle بإضافة حرفين أو رقمين عشوائيين حتى يمكن تثبيت النسخة بجانب الأصلية.")
+			}
+			.alert("استيراد من رابط", isPresented: $_isDownloadingPresenting) {
+				TextField("الرابط", text: $_alertDownloadString)
 					.textInputAutocapitalization(.never)
-				Button(.localized("Cancel"), role: .cancel) {
+				Button("إلغاء", role: .cancel) {
 					_alertDownloadString = ""
 				}
-				Button(.localized("OK")) {
+				Button("موافق") {
 					if let url = URL(string: _alertDownloadString) {
 						_ = downloadManager.startDownload(from: url, id: "FeatherManualDownload_\(UUID().uuidString)")
 					}
 				}
 			}
-				.onReceive(NotificationCenter.default.publisher(for: Notification.Name("Feather.installApp"))) { _ in
-					if let latest = _signedApps.first {
-						_selectedInstallAppPresenting = AnyApp(base: latest)
-					}
+			.onReceive(NotificationCenter.default.publisher(for: Notification.Name("Feather.installApp"))) { _ in
+				if let latest = _signedApps.first {
+					_selectedInstallAppPresenting = AnyApp(base: latest)
 				}
-				#if DEBUG
-					.onAppear {
-						if CommandLine.arguments.contains("-select") {
-							// The rehearsal hook for multi-sign: a script cannot tap
-							// "Select" or a row, so the mode is asked for on screen with
-							// everything in it picked.
-							Task { @MainActor in
-								try? await Task.sleep(nanoseconds: 1_200_000_000)
-								withAnimation(.snappy(duration: 0.22)) { _isSelecting = true }
-								try? await Task.sleep(nanoseconds: 600_000_000)
-								_toggleSelectAll()
-							}
-						}
-
-						if CommandLine.arguments.contains("-addchoice") {
-						// The rehearsal hook for the Add App dialog: a script cannot
-						// tap the corner +, so the dialog is asked for on screen.
-						Task { @MainActor in
-							try? await Task.sleep(nanoseconds: 1_500_000_000)
-							_isAddChoicePresenting = true
-						}
-					}
-				}
-				#endif
 			}
+			#if DEBUG
+			.onAppear {
+				if CommandLine.arguments.contains("-select") {
+					Task { @MainActor in
+						try? await Task.sleep(nanoseconds: 1_200_000_000)
+						withAnimation(.snappy(duration: 0.22)) { _isSelecting = true }
+						try? await Task.sleep(nanoseconds: 600_000_000)
+						_toggleSelectAll()
+					}
+				}
+
+				if CommandLine.arguments.contains("-addchoice") {
+					Task { @MainActor in
+						try? await Task.sleep(nanoseconds: 1_500_000_000)
+						_isAddChoicePresenting = true
+					}
+				}
+			}
+			#endif
 		}
 	}
+}
 
 // MARK: - Add App sheet
 
@@ -315,9 +302,9 @@ extension LibraryView {
 	/// every iOS draws the same, whatever the window's size class thinks it is.
 	private func _addAppSheet() -> some View {
 		VStack(alignment: .leading, spacing: 14) {
-			Text("Add App")
+			Text("إضافة تطبيق")
 				.font(.system(size: 22, weight: .bold, design: .rounded))
-			Text("Choose where the app comes from.")
+			Text("اختر مصدر التطبيق.")
 				.font(.system(size: 15))
 				.foregroundStyle(.secondary)
 
@@ -326,8 +313,8 @@ extension LibraryView {
 					_chooseImport(.files)
 				} label: {
 					_addAppRow(
-						title: "Import from Files",
-						subtitle: "Choose a file from the Files app",
+						title: "استيراد من الملفات",
+						subtitle: "اختر ملفاً من تطبيق الملفات",
 						icon: "folder"
 					)
 				}
@@ -342,8 +329,8 @@ extension LibraryView {
 					_chooseImport(.url)
 				} label: {
 					_addAppRow(
-						title: "Import from URL",
-						subtitle: "Paste a link to an app",
+						title: "استيراد من رابط",
+						subtitle: "الصق رابط التطبيق",
 						icon: "link"
 					)
 				}
@@ -406,6 +393,92 @@ extension LibraryView {
 			}
 		}
 	}
+
+	/// Copy a provider-owned file while its security scope is still valid.
+	/// The actual import waits until the user chooses direct or duplicate.
+	private func _stageLocalImports(_ urls: [URL]) {
+		_discardPendingLocalImports()
+
+		let fm = FileManager.default
+		var staged: [URL] = []
+
+		for source in urls {
+			do {
+				let scoped = source.startAccessingSecurityScopedResource()
+				defer {
+					if scoped { source.stopAccessingSecurityScopedResource() }
+				}
+
+				let ext = source.pathExtension.isEmpty ? "ipa" : source.pathExtension
+				let destination = fm.temporaryDirectory
+					.appendingPathComponent("FeatherImport_Choice_\(UUID().uuidString)")
+					.appendingPathExtension(ext)
+
+				if fm.fileExists(atPath: destination.path) {
+					try fm.removeItem(at: destination)
+				}
+				try fm.copyItem(at: source, to: destination)
+				staged.append(destination)
+			} catch {
+				Logger.misc.error(
+					"import staging: \(source.lastPathComponent, privacy: .public) — \(error.localizedDescription, privacy: .public)"
+				)
+				UIAlertController.showAlertWithOk(
+					title: "تعذر استيراد التطبيق",
+					message: "تعذر تجهيز \(source.lastPathComponent): \(error.localizedDescription)"
+				)
+			}
+		}
+
+		_pendingLocalImportURLs = staged
+	}
+
+	private func _presentPendingLocalInstallChoice() {
+		guard !_pendingLocalImportURLs.isEmpty else { return }
+		Task { @MainActor in
+			try? await Task.sleep(nanoseconds: 250_000_000)
+			_isLocalInstallChoicePresenting = true
+		}
+	}
+
+	private func _startPendingLocalImports(duplicate: Bool) {
+		let urls = _pendingLocalImportURLs
+		_pendingLocalImportURLs.removeAll()
+
+		for url in urls {
+			let id: String
+			if duplicate {
+				id = "BatSignDuplicate_\(Self._randomBundleSuffix())_\(UUID().uuidString)"
+			} else {
+				id = "BatSignDirect_\(UUID().uuidString)"
+			}
+
+			let dl = downloadManager.startArchive(from: url, id: id)
+			do {
+				try downloadManager.handlePachageFile(url: url, dl: dl)
+			} catch {
+				Logger.misc.error(
+					"import: \(url.lastPathComponent, privacy: .public) — \(error.localizedDescription, privacy: .public)"
+				)
+				UIAlertController.showAlertWithOk(
+					title: "تعذر استيراد التطبيق",
+					message: "تعذر استيراد \(url.lastPathComponent): \(error.localizedDescription)"
+				)
+			}
+		}
+	}
+
+	private func _discardPendingLocalImports() {
+		for url in _pendingLocalImportURLs {
+			try? FileManager.default.removeItem(at: url)
+		}
+		_pendingLocalImportURLs.removeAll()
+	}
+
+	private static func _randomBundleSuffix() -> String {
+		let alphabet = Array("abcdefghijklmnopqrstuvwxyz0123456789")
+		return String((0..<2).compactMap { _ in alphabet.randomElement() })
+	}
 }
 
 // MARK: - Picking several
@@ -455,10 +528,6 @@ extension LibraryView {
 		let started = BSBulkSign.shared.sign(apps, title: _bulkTitle)
 		_endSelecting()
 
-		// The only failure that can happen here is every job being refused — no
-		// certificate, a retired build — and the queue has already said why per
-		// app. This says that the run did not start at all, which is the part
-		// none of those individual lines can. 
 		if started == 0 {
 			UINotificationFeedbackGenerator().notificationOccurred(.warning)
 		}
@@ -538,10 +607,6 @@ extension LibraryView {
 	@ViewBuilder
 	private func _appCard(_ app: any AppInfoPresentable) -> some View {
 		HStack(spacing: 14) {
-			// While apps are being picked, the row's leading edge is the picker and
-			// the pill on its trailing edge goes away: a row in this mode answers
-			// one question, and two controls that both look tappable is how a
-			// person ends up in a signing sheet they did not ask for.
 			if _isSelecting {
 				Image(systemName: _isPicked(app) ? "checkmark.circle.fill" : "circle")
 					.font(.system(size: 22, weight: .regular))
@@ -674,7 +739,7 @@ extension LibraryView {
 				UIImpactFeedbackGenerator(style: .medium).impactOccurred()
 				AutoSignManager.shared.cloneApp(app: app)
 			} label: {
-			Label("Clone App", systemImage: "plus.square.on.square")
+				Label("Clone App", systemImage: "plus.square.on.square")
 			}
 			Button {
 				_selectedInstallAppPresenting = AnyApp(base: app, archive: true)
@@ -696,7 +761,7 @@ extension LibraryView {
 				UIImpactFeedbackGenerator(style: .medium).impactOccurred()
 				AutoSignManager.shared.cloneApp(app: app)
 			} label: {
-			Label("Clone App", systemImage: "plus.square.on.square")
+				Label("Clone App", systemImage: "plus.square.on.square")
 			}
 		}
 
@@ -713,8 +778,6 @@ extension LibraryView {
 	}
 
 	private func _emptyCard() -> some View {
-		// The same editorial empty state the other tabs use: straight on the
-		// screen's own ground, no pane behind the words.
 		VStack(spacing: 12) {
 			Image(systemName: "square.stack.3d.up.slash")
 				.font(.system(size: 34, weight: .regular))
@@ -730,7 +793,6 @@ extension LibraryView {
 		.frame(maxWidth: .infinity)
 		.padding(.vertical, 48)
 	}
-
 }
 
 // MARK: - Actions
