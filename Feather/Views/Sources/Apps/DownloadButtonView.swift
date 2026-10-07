@@ -45,7 +45,7 @@ struct DownloadButtonView: View {
 				Button {
 					showInstallChoices = true
 				} label: {
-					Text(.localized("Get"))
+					Text("تحميل")
 						.lineLimit(0)
 						.font(.headline.bold())
 						.foregroundStyle(Color.accentColor)
