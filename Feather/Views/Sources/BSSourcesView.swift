@@ -20,10 +20,30 @@ struct BSSourcesView: View {
 		animation: .snappy
 	) private var _allSources: FetchedResults<AltSource>
 
-	/// The sources this screen manages: the ones the user added.
-	///
+	private static let _primarySourceURL = "https://ikiraplus.pages.dev/IPA-AR.json"
+
+	/// Keep iKiraPlus first, then preserve the normal alphabetical order for all
+	/// remaining sources. This guarantees the primary catalogue stays at the top
+	/// even if another source changes its display name later.
 	private var _sources: [AltSource] {
-		Array(_allSources)
+		Array(_allSources).sorted { lhs, rhs in
+			let lhsIsPrimary = lhs.sourceURL?.absoluteString == Self._primarySourceURL
+			let rhsIsPrimary = rhs.sourceURL?.absoluteString == Self._primarySourceURL
+
+			if lhsIsPrimary != rhsIsPrimary {
+				return lhsIsPrimary
+			}
+
+			let lhsName = lhs.name ?? ""
+			let rhsName = rhs.name ?? ""
+			let nameOrder = lhsName.localizedCaseInsensitiveCompare(rhsName)
+
+			if nameOrder == .orderedSame {
+				return (lhs.sourceURL?.absoluteString ?? "") < (rhs.sourceURL?.absoluteString ?? "")
+			}
+
+			return nameOrder == .orderedAscending
+		}
 	}
 
 	@State private var _isAddingPresenting = false
@@ -53,13 +73,13 @@ struct BSSourcesView: View {
 								Text("No Sources")
 									.font(.system(size: 20, weight: .bold, design: .rounded))
 								Text("A source is where apps come from. Add one with the + button and its apps appear here.")
-								.font(.system(size: 14))
-								.foregroundStyle(BSStore.secondary)
-								.multilineTextAlignment(.center)
-								.padding(.horizontal, 24)
-						}
-						.frame(maxWidth: .infinity)
-						.padding(.vertical, 48)
+									.font(.system(size: 14))
+									.foregroundStyle(BSStore.secondary)
+									.multilineTextAlignment(.center)
+									.padding(.horizontal, 24)
+							}
+							.frame(maxWidth: .infinity)
+							.padding(.vertical, 48)
 					}
 
 					if !_sources.isEmpty {
