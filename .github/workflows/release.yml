@@ -25,17 +25,6 @@ jobs:
       - name: Select Xcode
         run: |
           set -euo pipefail
-          # The newest stable Xcode 26 or newer, chosen by version.
-          #
-          # The project needs an iOS 26 SDK, so anything older cannot compile it.
-          # Candidates are written out as "<version> <path>" and sorted with
-          # `sort -V`, so 26.10 outranks 26.9; sorting the directory names is
-          # what picks the wrong Xcode. Betas are skipped because a release is
-          # not cut with one.
-          #
-          # The loop is deliberately not wrapped in a command substitution: the
-          # runner's /bin/bash is 3.2, which mis-parses a compound statement
-          # inside `$( )`.
           CANDIDATES=$(mktemp)
           for APP in /Applications/Xcode*.app; do
             [ -d "$APP" ] || continue
@@ -88,11 +77,23 @@ jobs:
           path: packages/BatSign.ipa
           if-no-files-found: error
 
-      - name: Release (tags only)
+      - name: Release tagged version
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           name: BatSign ${{ github.ref_name }}
           files: packages/BatSign.ipa
           generate_release_notes: true
+          fail_on_unmatched_files: true
+
+      - name: Release main build
+        if: github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: BatSign Build #${{ github.run_number }}
+          target_commitish: ${{ github.sha }}
+          files: packages/BatSign.ipa
+          generate_release_notes: true
+          prerelease: true
           fail_on_unmatched_files: true
