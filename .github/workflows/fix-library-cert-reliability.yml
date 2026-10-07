@@ -1,0 +1,143 @@
+name: Apply Library and certificate reliability fix
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/fix-library-cert-reliability.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply reliability fixes
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_swift_function(text: str, signature: str, replacement: str) -> str:
+              start = text.index(signature)
+              brace = text.index('{', start)
+              depth = 0
+              end = None
+              for i in range(brace, len(text)):
+                  ch = text[i]
+                  if ch == '{':
+                      depth += 1
+                  elif ch == '}':
+                      depth -= 1
+                      if depth == 0:
+                          end = i + 1
+                          break
+              if end is None:
+                  raise RuntimeError(f'Could not find end of {signature}')
+              return text[:start] + replacement + text[end:]
+
+          # 1) Library: remove chained-sheet timing races. The user chooses the
+          # install mode first, then the native file importer opens. The selected
+          # file's security scope stays alive until the asynchronous import ends.
+          library_path = Path('Feather/Views/Library/LibraryView.swift')
+          library = library_path.read_text()
+
+          needle = '\t@State private var _isDownloadingPresenting = false\n'
+          if '\t@State private var _pendingLocalDuplicate = false\n' not in library:
+              library = library.replace(
+                  needle,
+                  needle + '\t@State private var _pendingLocalDuplicate = false\n',
+                  1
+              )
+
+          old_toolbar = '''\t\t\t\tToolbarItem(placement: .topBarTrailing) {\n\t\t\t\t\tButton {\n\t\t\t\t\t\tBSHaptics.tap()\n\t\t\t\t\t\t_isAddChoicePresenting = true\n\t\t\t\t\t} label: {\n\t\t\t\t\t\tHStack(spacing: 6) {\n\t\t\t\t\t\t\tImage(systemName: "plus")\n\t\t\t\t\t\t\tText("إضافة تطبيق")\n\t\t\t\t\t\t}\n\t\t\t\t\t\t.font(.body.weight(.semibold))\n\t\t\t\t\t}\n\t\t\t\t\t.accessibilityLabel("إضافة تطبيق")\n\t\t\t\t}\n'''
+          new_toolbar = '''\t\t\t\tToolbarItem(placement: .topBarTrailing) {\n\t\t\t\t\tMenu {\n\t\t\t\t\t\tMenu {\n\t\t\t\t\t\t\tButton("تحميل وتثبيت مباشر") {\n\t\t\t\t\t\t\t\tBSHaptics.tap()\n\t\t\t\t\t\t\t\t_pendingLocalDuplicate = false\n\t\t\t\t\t\t\t\t_isImportingPresenting = true\n\t\t\t\t\t\t\t}\n\t\t\t\t\t\t\tButton("تحميل وتثبيت مكرر") {\n\t\t\t\t\t\t\t\tBSHaptics.tap()\n\t\t\t\t\t\t\t\t_pendingLocalDuplicate = true\n\t\t\t\t\t\t\t\t_isImportingPresenting = true\n\t\t\t\t\t\t\t}\n\t\t\t\t\t\t} label: {\n\t\t\t\t\t\t\tLabel("استيراد من الملفات", systemImage: "folder")\n\t\t\t\t\t\t}\n\n\t\t\t\t\t\tButton {\n\t\t\t\t\t\t\tBSHaptics.tap()\n\t\t\t\t\t\t\t_isDownloadingPresenting = true\n\t\t\t\t\t\t} label: {\n\t\t\t\t\t\t\tLabel("استيراد من رابط", systemImage: "link")\n\t\t\t\t\t\t}\n\t\t\t\t\t} label: {\n\t\t\t\t\t\tHStack(spacing: 6) {\n\t\t\t\t\t\t\tImage(systemName: "plus")\n\t\t\t\t\t\t\tText("إضافة تطبيق")\n\t\t\t\t\t\t}\n\t\t\t\t\t\t.font(.body.weight(.semibold))\n\t\t\t\t\t}\n\t\t\t\t\t.accessibilityLabel("إضافة تطبيق")\n\t\t\t\t}\n'''
+          if old_toolbar not in library:
+              raise RuntimeError('Library toolbar block was not found')
+          library = library.replace(old_toolbar, new_toolbar, 1)
+
+          old_add_sheet = '''\t\t\t.sheet(isPresented: $_isAddChoicePresenting, onDismiss: _openPendingImport) {\n\t\t\t\t_addAppSheet()\n\t\t\t\t\t.presentationDetents([.height(250)])\n\t\t\t\t\t.presentationDragIndicator(.visible)\n\t\t\t\t\t.modifier(BSSheetGround(color: BS.screen))\n\t\t\t}\n'''
+          if old_add_sheet not in library:
+              raise RuntimeError('Add App sheet modifier was not found')
+          library = library.replace(old_add_sheet, '', 1)
+
+          old_import_flow = '''\t\t\t.sheet(isPresented: $_isImportingPresenting, onDismiss: _showLocalInstallChoiceIfNeeded) {\n\t\t\t\tFileImporterRepresentableView(\n\t\t\t\t\tallowedContentTypes: [.ipa, .tipa],\n\t\t\t\t\tallowsMultipleSelection: true,\n\t\t\t\t\tonDocumentsPicked: { urls in\n\t\t\t\t\t\tif urls.isEmpty {\n\t\t\t\t\t\t\t_pendingLocalImportURLs.removeAll()\n\t\t\t\t\t\t\t_isImportingPresenting = false\n\t\t\t\t\t\t\treturn\n\t\t\t\t\t\t}\n\t\t\t\t\t\t_pendingLocalImportURLs = urls\n\t\t\t\t\t\t_isImportingPresenting = false\n\t\t\t\t\t}\n\t\t\t\t)\n\t\t\t\t.ignoresSafeArea()\n\t\t\t}\n\t\t\t.confirmationDialog(\n\t\t\t\t"اختر طريقة التثبيت",\n\t\t\t\tisPresented: $_isLocalInstallChoicePresenting,\n\t\t\t\ttitleVisibility: .visible\n\t\t\t) {\n\t\t\t\tButton("تحميل وتثبيت مباشر") {\n\t\t\t\t\t_startPendingLocalImports(duplicate: false)\n\t\t\t\t}\n\t\t\t\tButton("تحميل وتثبيت مكرر") {\n\t\t\t\t\t_startPendingLocalImports(duplicate: true)\n\t\t\t\t}\n\t\t\t\tButton("إلغاء", role: .cancel) {\n\t\t\t\t\t_discardPendingLocalImports()\n\t\t\t\t}\n\t\t\t} message: {\n\t\t\t\tText("التثبيت المكرر يغيّر معرّف Bundle بإضافة حرفين أو رقمين عشوائيين حتى يمكن تثبيت النسخة بجانب الأصلية.")\n\t\t\t}\n'''
+          new_import_flow = '''\t\t\t.fileImporter(\n\t\t\t\tisPresented: $_isImportingPresenting,\n\t\t\t\tallowedContentTypes: [.ipa, .tipa],\n\t\t\t\tallowsMultipleSelection: true\n\t\t\t) { result in\n\t\t\t\tswitch result {\n\t\t\t\tcase .success(let urls):\n\t\t\t\t\tguard !urls.isEmpty else { return }\n\t\t\t\t\t_startLocalImports(urls, duplicate: _pendingLocalDuplicate)\n\t\t\t\tcase .failure(let error):\n\t\t\t\t\tLogger.misc.error("file picker: \\(error.localizedDescription, privacy: .public)")\n\t\t\t\t\tUIAlertController.showAlertWithOk(\n\t\t\t\t\t\ttitle: "تعذر استيراد التطبيق",\n\t\t\t\t\t\tmessage: error.localizedDescription\n\t\t\t\t\t)\n\t\t\t\t}\n\t\t\t}\n'''
+          if old_import_flow not in library:
+              raise RuntimeError('Old local import presentation flow was not found')
+          library = library.replace(old_import_flow, new_import_flow, 1)
+
+          insert_before = '\tprivate func _startPendingLocalImports(duplicate: Bool) {'
+          if 'private func _startLocalImports(_ urls: [URL], duplicate: Bool)' not in library:
+              new_local_func = '''\tprivate func _startLocalImports(_ urls: [URL], duplicate: Bool) {\n\t\tfor url in urls {\n\t\t\t// A Files-provider URL is only guaranteed while its security scope is\n\t\t\t// held. Keep that scope until AppFileHandler has copied, unpacked and\n\t\t\t// committed the app, not merely until this button action returns.\n\t\t\tlet scoped = url.startAccessingSecurityScopedResource()\n\n\t\t\tlet id: String\n\t\t\tif duplicate {\n\t\t\t\tid = "BatSignDuplicate_\\(Self._randomBundleSuffix())_\\(UUID().uuidString)"\n\t\t\t} else {\n\t\t\t\tid = "BatSignDirect_\\(UUID().uuidString)"\n\t\t\t}\n\n\t\t\tlet dl = downloadManager.startArchive(from: url, id: id)\n\t\t\tdo {\n\t\t\t\ttry downloadManager.handlePachageFile(url: url, dl: dl) { error in\n\t\t\t\t\tif scoped { url.stopAccessingSecurityScopedResource() }\n\t\t\t\t\tguard let error else { return }\n\t\t\t\t\tLogger.misc.error(\n\t\t\t\t\t\t"import: \\(url.lastPathComponent, privacy: .public) — \\(error.localizedDescription, privacy: .public)"\n\t\t\t\t\t)\n\t\t\t\t\tUIAlertController.showAlertWithOk(\n\t\t\t\t\t\ttitle: "تعذر استيراد التطبيق",\n\t\t\t\t\t\tmessage: "تعذر استيراد \\(url.lastPathComponent): \\(error.localizedDescription)"\n\t\t\t\t\t)\n\t\t\t\t}\n\t\t\t} catch {\n\t\t\t\tif scoped { url.stopAccessingSecurityScopedResource() }\n\t\t\t\tLogger.misc.error(\n\t\t\t\t\t"import: \\(url.lastPathComponent, privacy: .public) — \\(error.localizedDescription, privacy: .public)"\n\t\t\t\t)\n\t\t\t\tUIAlertController.showAlertWithOk(\n\t\t\t\t\ttitle: "تعذر استيراد التطبيق",\n\t\t\t\t\tmessage: "تعذر استيراد \\(url.lastPathComponent): \\(error.localizedDescription)"\n\t\t\t\t)\n\t\t\t}\n\t\t}\n\t}\n\n'''
+              library = library.replace(insert_before, new_local_func + insert_before, 1)
+
+          library_path.write_text(library)
+
+          # 2) DownloadManager: let callers hold security-scoped access until
+          # the asynchronous importer has actually finished.
+          dm_path = Path('Feather/Backend/Observable/DownloadManager.swift')
+          dm = dm_path.read_text()
+          signature = '\tfunc handlePachageFile(url: URL, dl: Download) throws '
+          new_dm_func = '''\tfunc handlePachageFile(\n\t\turl: URL,\n\t\tdl: Download,\n\t\tcompletion: ((Error?) -> Void)? = nil\n\t) throws {\n\t\tSelf.log.notice("download: handing \\(dl.id.prefix(8), privacy: .public) to the importer — \\(url.lastPathComponent, privacy: .public)")\n\t\tFR.handlePackageFile(url, download: dl) { err in\n\t\t\tif err != nil {\n\t\t\t\tlet generator = UINotificationFeedbackGenerator()\n\t\t\t\tgenerator.notificationOccurred(.error)\n\n\t\t\t\tDispatchQueue.main.async {\n\t\t\t\t\tDownloadManager.shared._fail(\n\t\t\t\t\t\tdl,\n\t\t\t\t\t\treason: err?.localizedDescription ?? "Couldn't open the package"\n\t\t\t\t\t)\n\t\t\t\t}\n\t\t\t} else {\n\t\t\t\tlet isUpdate = dl.id.hasPrefix(BatSignAuto.downloadPrefix)\n\t\t\t\t\t|| dl.id.hasPrefix(BatSignAuto.manualUpdatePrefix)\n\t\t\t\tLiveStatus.update(\n\t\t\t\t\tphase: isUpdate ? .updating : .signing,\n\t\t\t\t\tappName: dl.cardName,\n\t\t\t\t\tprogress: 0,\n\t\t\t\t\tdetail: isUpdate ? "Updating" : "Signing and installing",\n\t\t\t\t\tprogressKnown: false,\n\t\t\t\t\tforce: true,\n\t\t\t\t\tappID: dl.liveID,\n\t\t\t\t\tmode: CompressionMode.stored.label\n\t\t\t\t)\n\t\t\t}\n\n\t\t\tDispatchQueue.main.async {\n\t\t\t\tDownloadManager.shared._removeProgressNotification(for: dl)\n\t\t\t\tDownloadManager.shared._drop(dl)\n\t\t\t\tcompletion?(err)\n\t\t\t}\n\t\t}\n\t}'''
+          if signature not in dm:
+              raise RuntimeError('DownloadManager handlePachageFile signature not found')
+          dm = replace_swift_function(dm, signature, new_dm_func)
+          dm_path.write_text(dm)
+
+          # 3) Bundled certificate: Xcode's synchronized folder currently puts
+          # cert.* at the app bundle root, while the old code only searched a
+          # signing-assets directory. Support both layouts, trim cert.txt, retry
+          # on future launches when import failed, and deduplicate by profile UUID.
+          app_path = Path('Feather/FeatherApp.swift')
+          app = app_path.read_text()
+          cert_signature = '\tprivate func _addDefaultCertificates() '
+          new_cert_func = '''\tprivate func _addDefaultCertificates() {\n\t\tstruct BundledCertificate {\n\t\t\tlet name: String\n\t\t\tlet p12: URL\n\t\t\tlet provision: URL\n\t\t\tlet password: URL\n\t\t}\n\n\t\tlet fm = FileManager.default\n\t\tvar candidates: [BundledCertificate] = []\n\n\t\t// Preferred layout: signing-assets/<name>/cert.*\n\t\tif let signingAssetsURL = Bundle.main.url(forResource: "signing-assets", withExtension: nil),\n\t\t   let folders = try? fm.contentsOfDirectory(\n\t\t\tat: signingAssetsURL,\n\t\t\tincludingPropertiesForKeys: [.isDirectoryKey],\n\t\t\toptions: .skipsHiddenFiles\n\t\t   ) {\n\t\t\tfor folder in folders where folder.hasDirectoryPath {\n\t\t\t\tlet p12 = folder.appendingPathComponent("cert.p12")\n\t\t\t\tlet provision = folder.appendingPathComponent("cert.mobileprovision")\n\t\t\t\tlet password = folder.appendingPathComponent("cert.txt")\n\t\t\t\tguard fm.fileExists(atPath: p12.path),\n\t\t\t\t      fm.fileExists(atPath: provision.path),\n\t\t\t\t      fm.fileExists(atPath: password.path) else { continue }\n\t\t\t\tcandidates.append(.init(\n\t\t\t\t\tname: folder.lastPathComponent,\n\t\t\t\t\tp12: p12,\n\t\t\t\t\tprovision: provision,\n\t\t\t\t\tpassword: password\n\t\t\t\t))\n\t\t\t}\n\t\t}\n\n\t\t// Current Xcode synchronized-group layout: the three files are flattened\n\t\t// into the root of BatSign.app. The shipped IPA uses this layout today.\n\t\tif candidates.isEmpty,\n\t\t   let p12 = Bundle.main.url(forResource: "cert", withExtension: "p12"),\n\t\t   let provision = Bundle.main.url(forResource: "cert", withExtension: "mobileprovision"),\n\t\t   let password = Bundle.main.url(forResource: "cert", withExtension: "txt") {\n\t\t\tcandidates.append(.init(\n\t\t\t\tname: "iKiraPlus",\n\t\t\t\tp12: p12,\n\t\t\t\tprovision: provision,\n\t\t\t\tpassword: password\n\t\t\t))\n\t\t}\n\n\t\tguard !candidates.isEmpty else {\n\t\t\tLogger.misc.warning("No bundled signing certificate assets were found")\n\t\t\treturn\n\t\t}\n\n\t\t// Do not use the old one-shot UserDefaults gate. If a previous import\n\t\t// failed, the next launch must repair it. A profile UUID is the stable\n\t\t// identity and prevents duplicates when the certificate already exists.\n\t\tvar existingProfileUUIDs = Set(\n\t\t\tStorage.shared.getAllCertificates().compactMap {\n\t\t\t\tStorage.shared.getProvisionFileDecoded(for: $0)?.UUID\n\t\t\t}\n\t\t)\n\n\t\tfor candidate in candidates {\n\t\t\tguard let decoded = CertificateReader(candidate.provision).decoded else {\n\t\t\t\tLogger.misc.error("Bundled certificate \\(candidate.name, privacy: .public) has an invalid provisioning profile")\n\t\t\t\tcontinue\n\t\t\t}\n\t\t\tguard !existingProfileUUIDs.contains(decoded.UUID) else { continue }\n\n\t\t\tlet rawPassword = (try? String(contentsOf: candidate.password, encoding: .utf8)) ?? ""\n\t\t\tlet password = rawPassword.trimmingCharacters(in: .whitespacesAndNewlines)\n\n\t\t\tguard FR.checkPasswordForCertificate(\n\t\t\t\tfor: candidate.p12,\n\t\t\t\twith: password,\n\t\t\t\tusing: candidate.provision\n\t\t\t) else {\n\t\t\t\tLogger.misc.error("Bundled certificate \\(candidate.name, privacy: .public) has an invalid P12 password")\n\t\t\t\tcontinue\n\t\t\t}\n\n\t\t\texistingProfileUUIDs.insert(decoded.UUID)\n\t\t\tFR.handleCertificateFiles(\n\t\t\t\tp12URL: candidate.p12,\n\t\t\t\tprovisionURL: candidate.provision,\n\t\t\t\tp12Password: password,\n\t\t\t\tcertificateName: candidate.name,\n\t\t\t\tisDefault: true\n\t\t\t) { error in\n\t\t\t\tif let error {\n\t\t\t\t\tLogger.misc.error("Bundled certificate import failed: \\(error.localizedDescription, privacy: .public)")\n\t\t\t\t} else {\n\t\t\t\t\tUserDefaults.standard.set(true, forKey: "feather.didImportDefaultCertificates")\n\t\t\t\t\tLogger.misc.info("Bundled certificate \\(candidate.name, privacy: .public) imported")\n\t\t\t\t}\n\t\t\t}\n\t\t}\n\t}'''
+          if cert_signature not in app:
+              raise RuntimeError('_addDefaultCertificates not found')
+          app = replace_swift_function(app, cert_signature, new_cert_func)
+          app_path.write_text(app)
+          PY
+
+      - name: Verify source changes
+        run: |
+          set -euo pipefail
+          grep -F 'Menu {' Feather/Views/Library/LibraryView.swift
+          grep -F 'Button("تحميل وتثبيت مباشر")' Feather/Views/Library/LibraryView.swift
+          grep -F 'Button("تحميل وتثبيت مكرر")' Feather/Views/Library/LibraryView.swift
+          grep -F '.fileImporter(' Feather/Views/Library/LibraryView.swift
+          grep -F 'startAccessingSecurityScopedResource()' Feather/Views/Library/LibraryView.swift
+          grep -F 'completion: ((Error?) -> Void)? = nil' Feather/Backend/Observable/DownloadManager.swift
+          grep -F 'Bundle.main.url(forResource: "cert", withExtension: "p12")' Feather/FeatherApp.swift
+          grep -F 'trimmingCharacters(in: .whitespacesAndNewlines)' Feather/FeatherApp.swift
+          grep -F 'existingProfileUUIDs' Feather/FeatherApp.swift
+          git diff --check
+
+      - name: Build check
+        run: |
+          set -euo pipefail
+          # Linux cannot build the iOS app; the full Xcode build is dispatched
+          # immediately after the source commit below.
+          python3 -m py_compile scripts/fix-install-ui.py
+
+      - name: Commit fixes
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Feather/Views/Library/LibraryView.swift Feather/Backend/Observable/DownloadManager.swift Feather/FeatherApp.swift
+          git diff --cached --check
+          git commit -m "Fix Library imports and bundled certificate loading"
+          git push origin HEAD:main
+
+      - name: Build fixed main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run release.yml --ref main
