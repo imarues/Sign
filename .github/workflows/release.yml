@@ -64,8 +64,16 @@ jobs:
           grep -F 'existingProfileUUIDs' Feather/FeatherApp.swift
           grep -F '.trimmingCharacters(in: .whitespacesAndNewlines)' Feather/FeatherApp.swift
           ! grep -F 'UserDefaults.standard.bool(forKey: "feather.didImportDefaultCertificates") == false' Feather/FeatherApp.swift
-          grep -F '_stageLocalImportsAndPresentChoice(urls)' Feather/Views/Library/LibraryView.swift
-          grep -F 'BatSignPickedApps' Feather/Views/Library/LibraryView.swift
+          grep -F 'FileImporterRepresentableView(' Feather/Views/Library/LibraryView.swift
+          grep -F 'BatSignLibraryOnly_' Feather/Views/Library/LibraryView.swift
+          grep -F 'Button("نسخة مكررة أولى")' Feather/Views/Library/LibraryView.swift
+          grep -F 'Button("نسخة مكررة خامسة")' Feather/Views/Library/LibraryView.swift
+          grep -F 'Button("تكرار عشوائي")' Feather/Views/Library/LibraryView.swift
+          grep -F 'WSActionButton(title: "تثبيت")' Feather/Views/Library/LibraryView.swift
+          grep -F 'options.post_installAppAfterSigned = true' Feather/Views/Library/LibraryView.swift
+          grep -F 'isLibraryOnlyImport' Feather/Utilities/Handlers/AppFileHandler.swift
+          ! grep -Fq '_stageLocalImportsAndPresentChoice' Feather/Views/Library/LibraryView.swift
+          ! grep -Fq '_isLocalInstallChoicePresenting' Feather/Views/Library/LibraryView.swift
 
       - name: Build (unsigned, iOS device)
         run: |
