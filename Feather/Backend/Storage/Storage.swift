@@ -124,7 +124,10 @@ final class Storage: ObservableObject {
 	/// something the user can act on; a launch crash loop is not.
 	private func _loadPersistentStoreAggressively() {
 		container.loadPersistentStores { description, error in
-			guard let error else { return }
+			guard let error else {
+				self._ensureDefaultSource()
+				return
+			}
 
 			Logger.storage.error(
 				"store: load failed — \(error.localizedDescription, privacy: .public)"
@@ -135,7 +138,10 @@ final class Storage: ObservableObject {
 			}
 
 			self.container.loadPersistentStores { _, secondError in
-				guard let secondError else { return }
+				guard let secondError else {
+					self._ensureDefaultSource()
+					return
+				}
 
 				Logger.storage.error(
 					"store: still unavailable — \(secondError.localizedDescription, privacy: .public)"
@@ -156,10 +162,23 @@ final class Storage: ObservableObject {
 						Logger.storage.fault(
 							"store: in-memory fallback failed — \(thirdError.localizedDescription, privacy: .public)"
 						)
+					} else {
+						self._ensureDefaultSource()
 					}
 				}
 			}
 		}
+	}
+
+	/// Ensure the iKiraPlus catalogue is present after the persistent store is
+	/// ready. `handleSource` fetches the repository metadata first and performs
+	/// its Core Data existence check on the main queue. `silent` keeps launch
+	/// clean when the source is already present or temporarily unreachable.
+	private func _ensureDefaultSource() {
+		FR.handleSource(
+			"https://ikiraplus.pages.dev/IPA-AR.json",
+			silent: true
+		) { }
 	}
 
 	/// Whether a store is damaged rather than merely out of reach.
