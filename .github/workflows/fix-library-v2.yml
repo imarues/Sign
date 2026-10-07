@@ -1,0 +1,152 @@
+name: Apply Library import v2 fix
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/fix-library-v2.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Patch Library import flow
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('Feather/Views/Library/LibraryView.swift')
+          text = path.read_text()
+
+          old_picker = '''\t\t\t.sheet(isPresented: $_isImportingPresenting, onDismiss: _showLocalInstallChoiceIfNeeded) {
+          \t\t\t\tFileImporterRepresentableView(
+          \t\t\t\t\tallowedContentTypes: [.ipa, .tipa],
+          \t\t\t\t\tallowsMultipleSelection: true,
+          \t\t\t\t\tonDocumentsPicked: { urls in
+          \t\t\t\t\t\tif urls.isEmpty {
+          \t\t\t\t\t\t\t_pendingLocalImportURLs.removeAll()
+          \t\t\t\t\t\t\t_isImportingPresenting = false
+          \t\t\t\t\t\t\treturn
+          \t\t\t\t\t\t}
+          \t\t\t\t\t\t_pendingLocalImportURLs = urls
+          \t\t\t\t\t\t_isImportingPresenting = false
+          \t\t\t\t\t}
+          \t\t\t\t)
+          \t\t\t\t.ignoresSafeArea()
+          \t\t\t}'''
+
+          new_picker = '''\t\t\t.fileImporter(
+          \t\t\t\tisPresented: $_isImportingPresenting,
+          \t\t\t\tallowedContentTypes: [.ipa, .tipa],
+          \t\t\t\tallowsMultipleSelection: true
+          \t\t\t) { result in
+          \t\t\t\tswitch result {
+          \t\t\t\tcase .success(let urls):
+          \t\t\t\t\t_stageLocalImportsAndPresentChoice(urls)
+          \t\t\t\tcase .failure(let error):
+          \t\t\t\t\tLogger.misc.error("file picker: \\(error.localizedDescription, privacy: .public)")
+          \t\t\t\t\tUIAlertController.showAlertWithOk(
+          \t\t\t\t\t\ttitle: "تعذر استيراد التطبيق",
+          \t\t\t\t\t\tmessage: error.localizedDescription
+          \t\t\t\t\t)
+          \t\t\t\t}
+          \t\t\t}'''
+
+          if old_picker not in text:
+              raise SystemExit('Expected old picker block not found')
+          text = text.replace(old_picker, new_picker, 1)
+
+          old_helper = '''\tprivate func _showLocalInstallChoiceIfNeeded() {
+          \t\tguard !_pendingLocalImportURLs.isEmpty else { return }
+          \t\t_isLocalInstallChoicePresenting = true
+          \t}'''
+
+          new_helper = '''\t@MainActor
+          \tprivate func _stageLocalImportsAndPresentChoice(_ urls: [URL]) {
+          \t\t_pendingLocalImportURLs.removeAll()
+          \t\tguard !urls.isEmpty else { return }
+
+          \t\tlet fm = FileManager.default
+          \t\tlet stagingRoot = fm.temporaryDirectory
+          \t\t\t.appendingPathComponent("BatSignPickedApps", isDirectory: true)
+
+          \t\tdo {
+          \t\t\ttry fm.createDirectory(at: stagingRoot, withIntermediateDirectories: true)
+          \t\t} catch {
+          \t\t\tUIAlertController.showAlertWithOk(
+          \t\t\t\ttitle: "تعذر استيراد التطبيق",
+          \t\t\t\tmessage: error.localizedDescription
+          \t\t\t)
+          \t\t\treturn
+          \t\t}
+
+          \t\tvar staged: [URL] = []
+          \t\tfor source in urls {
+          \t\t\tlet scoped = source.startAccessingSecurityScopedResource()
+          \t\t\tdefer {
+          \t\t\t\tif scoped { source.stopAccessingSecurityScopedResource() }
+          \t\t\t}
+
+          \t\t\tdo {
+          \t\t\t\tlet ext = source.pathExtension.isEmpty ? "ipa" : source.pathExtension
+          \t\t\t\tlet destination = stagingRoot
+          \t\t\t\t\t.appendingPathComponent(UUID().uuidString)
+          \t\t\t\t\t.appendingPathExtension(ext)
+          \t\t\t\ttry fm.copyItem(at: source, to: destination)
+          \t\t\t\tstaged.append(destination)
+          \t\t\t} catch {
+          \t\t\t\tLogger.misc.error(
+          \t\t\t\t\t"import staging: \\(source.lastPathComponent, privacy: .public) — \\(error.localizedDescription, privacy: .public)"
+          \t\t\t\t)
+          \t\t\t\tUIAlertController.showAlertWithOk(
+          \t\t\t\t\ttitle: "تعذر استيراد التطبيق",
+          \t\t\t\t\tmessage: "تعذر تجهيز \\(source.lastPathComponent): \\(error.localizedDescription)"
+          \t\t\t\t)
+          \t\t\t}
+          \t\t}
+
+          \t\t_pendingLocalImportURLs = staged
+          \t\tguard !staged.isEmpty else { return }
+
+          \t\t// The native fileImporter has already handed us the result. Move the
+          \t\t// confirmation to the next main run-loop turn so it never competes
+          \t\t// with the document picker's dismissal, without an arbitrary delay.
+          \t\tDispatchQueue.main.async {
+          \t\t\t_isLocalInstallChoicePresenting = true
+          \t\t}
+          \t}'''
+
+          if old_helper not in text:
+              raise SystemExit('Expected old helper not found')
+          text = text.replace(old_helper, new_helper, 1)
+
+          path.write_text(text)
+          PY
+
+      - name: Verify patch
+        run: |
+          set -euo pipefail
+          grep -F '.fileImporter(' Feather/Views/Library/LibraryView.swift
+          grep -F '_stageLocalImportsAndPresentChoice(urls)' Feather/Views/Library/LibraryView.swift
+          grep -F 'BatSignPickedApps' Feather/Views/Library/LibraryView.swift
+          ! grep -F '.sheet(isPresented: $_isImportingPresenting, onDismiss: _showLocalInstallChoiceIfNeeded)' Feather/Views/Library/LibraryView.swift
+          git diff --check
+
+      - name: Commit source fix and remove one-time workflow
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/fix-library-v2.yml
+          git add Feather/Views/Library/LibraryView.swift
+          git commit -m "Stage Files imports before showing install choices"
+          git push origin HEAD:main
