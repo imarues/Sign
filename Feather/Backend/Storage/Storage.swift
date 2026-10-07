@@ -170,13 +170,18 @@ final class Storage: ObservableObject {
 		}
 	}
 
-	/// Ensure the iKiraPlus catalogue is present after the persistent store is
-	/// ready. `handleSource` fetches the repository metadata first and performs
-	/// its Core Data existence check on the main queue. `silent` keeps launch
-	/// clean when the source is already present or temporarily unreachable.
+	/// Ensure both bundled catalogues are present after the persistent store is
+	/// ready. Each source is fetched independently so an unavailable source never
+	/// blocks the other one from being added. `silent` keeps launch clean when a
+	/// source is already present or temporarily unreachable.
 	private func _ensureDefaultSource() {
 		FR.handleSource(
 			"https://ikiraplus.pages.dev/IPA-AR.json",
+			silent: true
+		) { }
+
+		FR.handleSource(
+			"https://raw.githubusercontent.com/sgad73055-code/ipastrong/refs/heads/main/ipastrong.json",
 			silent: true
 		) { }
 	}
