@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
     paths:
+      - 'scripts/apply_library_actions.py'
       - '.github/workflows/apply-library-card-actions.yml'
 
 permissions:
@@ -18,235 +19,8 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Patch Library import and card actions
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-
-          lib_path = Path('Feather/Views/Library/LibraryView.swift')
-          s = lib_path.read_text()
-
-          old_state = '''\n\t/// Files selected from the Files picker are copied into app-owned temporary
-\t/// storage before the picker closes. That lets us ask which install mode the
-\t/// user wants without losing the document provider's security-scoped access.
-\t@State private var _pendingLocalImportURLs: [URL] = []
-\t@State private var _isLocalInstallChoicePresenting = false
-'''
-          assert old_state in s, 'pending local import state not found'
-          s = s.replace(old_state, '\n', 1)
-
-          old_picker = '''\t\t\t.fileImporter(
-\t\t\t\tisPresented: $_isImportingPresenting,
-\t\t\t\tallowedContentTypes: [.ipa, .tipa],
-\t\t\t\tallowsMultipleSelection: true
-\t\t\t) { result in
-\t\t\t\tswitch result {
-\t\t\t\tcase .success(let urls):
-\t\t\t\t\t_stageLocalImportsAndPresentChoice(urls)
-\t\t\t\tcase .failure(let error):
-\t\t\t\t\tLogger.misc.error("file picker: \\(error.localizedDescription, privacy: .public)")
-\t\t\t\t\tUIAlertController.showAlertWithOk(
-\t\t\t\t\t\ttitle: "تعذر استيراد التطبيق",
-\t\t\t\t\t\tmessage: error.localizedDescription
-\t\t\t\t\t)
-\t\t\t\t}
-\t\t\t}
-\t\t\t.confirmationDialog(
-\t\t\t\t"اختر طريقة التثبيت",
-\t\t\t\tisPresented: $_isLocalInstallChoicePresenting,
-\t\t\t\ttitleVisibility: .visible
-\t\t\t) {
-\t\t\t\tButton("تحميل وتثبيت مباشر") {
-\t\t\t\t\t_startPendingLocalImports(duplicate: false)
-\t\t\t\t}
-\t\t\t\tButton("تحميل وتثبيت مكرر") {
-\t\t\t\t\t_startPendingLocalImports(duplicate: true)
-\t\t\t\t}
-\t\t\t\tButton("إلغاء", role: .cancel) {
-\t\t\t\t\t_discardPendingLocalImports()
-\t\t\t\t}
-\t\t\t} message: {
-\t\t\t\tText("التثبيت المكرر يغيّر معرّف Bundle بإضافة حرفين أو رقمين عشوائيين حتى يمكن تثبيت النسخة بجانب الأصلية.")
-\t\t\t}
-'''
-          new_picker = '''\t\t\t.sheet(isPresented: $_isImportingPresenting) {
-\t\t\t\tFileImporterRepresentableView(
-\t\t\t\t\tallowedContentTypes: [.ipa, .tipa],
-\t\t\t\t\tallowsMultipleSelection: true,
-\t\t\t\t\tonDocumentsPicked: { urls in
-\t\t\t\t\t\tguard !urls.isEmpty else { return }
-\t\t\t\t\t\tfor url in urls {
-\t\t\t\t\t\t\tlet id = "BatSignLibraryOnly_\\(UUID().uuidString)"
-\t\t\t\t\t\t\tlet dl = downloadManager.startArchive(from: url, id: id)
-\t\t\t\t\t\t\tdo {
-\t\t\t\t\t\t\t\ttry downloadManager.handlePachageFile(url: url, dl: dl)
-\t\t\t\t\t\t\t} catch {
-\t\t\t\t\t\t\t\tLogger.misc.error(
-\t\t\t\t\t\t\t\t\t"import: \\(url.lastPathComponent, privacy: .public) — \\(error.localizedDescription, privacy: .public)"
-\t\t\t\t\t\t\t\t)
-\t\t\t\t\t\t\t\tUIAlertController.showAlertWithOk(
-\t\t\t\t\t\t\t\t\ttitle: "تعذر استيراد التطبيق",
-\t\t\t\t\t\t\t\t\tmessage: "تعذر استيراد \\(url.lastPathComponent): \\(error.localizedDescription)"
-\t\t\t\t\t\t\t\t)
-\t\t\t\t\t\t\t}
-\t\t\t\t\t\t}
-\t\t\t\t\t}
-\t\t\t\t)
-\t\t\t\t.ignoresSafeArea()
-\t\t\t}
-'''
-          assert old_picker in s, 'current fileImporter block not found'
-          s = s.replace(old_picker, new_picker, 1)
-
-          old_url = '_ = downloadManager.startDownload(from: url, id: "FeatherManualDownload_\\(UUID().uuidString)")'
-          new_url = '_ = downloadManager.startDownload(from: url, id: "BatSignLibraryOnly_\\(UUID().uuidString)")'
-          assert old_url in s, 'manual URL import id not found'
-          s = s.replace(old_url, new_url, 1)
-
-          helper_start = s.index('\n\t@MainActor\n\tprivate func _stageLocalImportsAndPresentChoice')
-          helper_end = s.index('\n}\n\n// MARK: - Picking several', helper_start)
-          s = s[:helper_start] + s[helper_end:]
-
-          pill_start = s.index('\n\t@ViewBuilder\n\tprivate func _actionPill')
-          pill_end = s.index('\n\tprivate func _isInstalling', pill_start)
-          new_pill = r'''
-	@ViewBuilder
-	private func _actionPill(_ app: any AppInfoPresentable) -> some View {
-		if let update = updateManager.update(for: app) {
-			WSActionButton(title: "Update") {
-				_startUpdateDownload(update)
-			}
-		} else if app.isSigned {
-			WSActionButton(title: "Open") {
-				UIApplication.openApp(with: app.identifier ?? "")
-			}
-		} else if _isInstalling(app) {
-			HStack(spacing: 8) {
-				ProgressView()
-					.frame(width: 16, height: 16)
-				Text(.localized("Installing"))
-					.font(.caption.weight(.semibold))
-					.foregroundStyle(.secondary)
-			}
-			.frame(minWidth: 68, minHeight: 30)
-		} else {
-			HStack(spacing: 6) {
-				_duplicateMenu(app)
-				WSActionButton(title: "تثبيت") {
-					_signAndInstall(app, bundleSuffix: nil)
-				}
-			}
-		}
-	}
-
-	@ViewBuilder
-	private func _duplicateMenu(_ app: any AppInfoPresentable) -> some View {
-		Menu {
-			Button("نسخة مكررة أولى") { _signAndInstall(app, bundleSuffix: "1") }
-			Button("نسخة مكررة ثانية") { _signAndInstall(app, bundleSuffix: "2") }
-			Button("نسخة مكررة ثالثة") { _signAndInstall(app, bundleSuffix: "3") }
-			Button("نسخة مكررة رابعة") { _signAndInstall(app, bundleSuffix: "4") }
-			Button("نسخة مكررة خامسة") { _signAndInstall(app, bundleSuffix: "5") }
-			Divider()
-			Button("تكرار عشوائي") {
-				_signAndInstall(app, bundleSuffix: Self._randomDuplicateSuffix())
-			}
-		} label: {
-			HStack(spacing: 4) {
-				Text("تكرار")
-				Image(systemName: "chevron.down")
-					.font(.system(size: 9, weight: .bold))
-			}
-			.font(.caption.weight(.bold))
-			.foregroundStyle(.primary)
-			.padding(.horizontal, 12)
-			.frame(minWidth: 68, minHeight: 30)
-			.background {
-				if #available(iOS 26.0, *) {
-					Color.clear
-						.glassEffect(.regular.interactive(), in: Capsule())
-				} else {
-					Capsule().fill(BS.chipFill)
-				}
-			}
-		}
-		.buttonStyle(.plain)
-	}
-
-	private func _signAndInstall(_ app: any AppInfoPresentable, bundleSuffix: String?) {
-		var options = OptionsManager.shared.options
-		options.appIdentifier = nil
-		options.signingOption = .default
-		options.post_installAppAfterSigned = true
-		options.post_deleteAppAfterSigned = false
-
-		if let bundleSuffix {
-			guard let baseIdentifier = app.identifier, !baseIdentifier.isEmpty else {
-				UIAlertController.showAlertWithOk(
-					title: "تعذر إنشاء نسخة مكررة",
-					message: "لا يحتوي التطبيق على Bundle ID صالح للتكرار."
-				)
-				return
-			}
-			options.appIdentifier = baseIdentifier + bundleSuffix
-		}
-
-		UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-		let accepted = AutoSignManager.shared.enqueue(
-			app: app,
-			reason: .autoSign,
-			options: options,
-			force: true
-		)
-
-		if !accepted {
-			UIAlertController.showAlertWithOk(
-				title: "تعذر بدء التثبيت",
-				message: "تعذر إضافة التطبيق إلى قائمة التوقيع."
-			)
-		}
-	}
-
-	private static func _randomDuplicateSuffix() -> String {
-		let alphabet = Array("abcdefghijklmnopqrstuvwxyz0123456789")
-		return String((0..<2).compactMap { _ in alphabet.randomElement() })
-	}
-'''
-          s = s[:pill_start] + new_pill + s[pill_end:]
-          lib_path.write_text(s)
-
-          handler_path = Path('Feather/Utilities/Handlers/AppFileHandler.swift')
-          h = handler_path.read_text()
-          old_flags = '''\t\tlet transferID = _download?.id
-\t\tlet isAutoUpdateDownload = transferID?.hasPrefix(BatSignAuto.downloadPrefix) ?? false
-\t\tlet isManualUpdateDownload = transferID?.hasPrefix(BatSignAuto.manualUpdatePrefix) ?? false
-'''
-          new_flags = '''\t\tlet transferID = _transferID ?? _download?.id
-\t\tlet isLibraryOnlyImport = transferID?.hasPrefix("BatSignLibraryOnly_") ?? false
-\t\tlet isAutoUpdateDownload = transferID?.hasPrefix(BatSignAuto.downloadPrefix) ?? false
-\t\tlet isManualUpdateDownload = transferID?.hasPrefix(BatSignAuto.manualUpdatePrefix) ?? false
-'''
-          assert old_flags in h, 'transfer flags not found'
-          h = h.replace(old_flags, new_flags, 1)
-
-          old_route = '''\t\tawait MainActor.run {
-\t\t\tif SourceInstallIntent.handleIfRequested(
-'''
-          new_route = '''\t\tawait MainActor.run {
-\t\t\tif isLibraryOnlyImport {
-\t\t\t\tLiveStatus.finish(
-\t\t\t\t\tsuccess: true,
-\t\t\t\t\tappName: cardName,
-\t\t\t\t\tdetail: "تمت الإضافة إلى المكتبة",
-\t\t\t\t\tappID: cardID
-\t\t\t\t)
-\t\t\t\treturn
-\t\t\t} else if SourceInstallIntent.handleIfRequested(
-'''
-          assert old_route in h, 'post-import route not found'
-          h = h.replace(old_route, new_route, 1)
-          handler_path.write_text(h)
-          PY
+      - name: Apply patch
+        run: python3 scripts/apply_library_actions.py
 
       - name: Verify requested behavior
         run: |
@@ -259,14 +33,12 @@ jobs:
           grep -F 'WSActionButton(title: "تثبيت")' Feather/Views/Library/LibraryView.swift
           grep -F 'options.post_installAppAfterSigned = true' Feather/Views/Library/LibraryView.swift
           grep -F 'isLibraryOnlyImport' Feather/Utilities/Handlers/AppFileHandler.swift
-          ! grep -Fq '_isLocalInstallChoicePresenting' Feather/Views/Library/LibraryView.swift
-          ! grep -Fq '_stageLocalImportsAndPresentChoice' Feather/Views/Library/LibraryView.swift
 
-      - name: Commit fix and remove one-time workflow
+      - name: Commit patch and remove one-time files
         run: |
           git config user.name 'ikiraplus'
           git config user.email 'rhomy1515@gmail.com'
-          git rm .github/workflows/apply-library-card-actions.yml
+          git rm .github/workflows/apply-library-card-actions.yml scripts/apply_library_actions.py
           git add Feather/Views/Library/LibraryView.swift Feather/Utilities/Handlers/AppFileHandler.swift
           git commit -m 'Restore Library import and add install duplicate actions'
           git push
