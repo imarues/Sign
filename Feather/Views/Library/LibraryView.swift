@@ -37,11 +37,6 @@ struct LibraryView: View {
 	@State private var _pendingImport: _PendingImport?
 	@State private var _alertDownloadString = ""
 
-	/// Files selected from the Files picker are copied into app-owned temporary
-	/// storage before the picker closes. That lets us ask which install mode the
-	/// user wants without losing the document provider's security-scoped access.
-	@State private var _pendingLocalImportURLs: [URL] = []
-	@State private var _isLocalInstallChoicePresenting = false
 
 	@State private var _searchText = ""
 	@State private var _selectedScope: Scope = .all
@@ -191,38 +186,30 @@ struct LibraryView: View {
 			.sheet(item: $_selectedSigningAppPresenting) { app in
 				SigningView(app: app.base)
 			}
-			.fileImporter(
-				isPresented: $_isImportingPresenting,
-				allowedContentTypes: [.ipa, .tipa],
-				allowsMultipleSelection: true
-			) { result in
-				switch result {
-				case .success(let urls):
-					_stageLocalImportsAndPresentChoice(urls)
-				case .failure(let error):
-					Logger.misc.error("file picker: \(error.localizedDescription, privacy: .public)")
-					UIAlertController.showAlertWithOk(
-						title: "تعذر استيراد التطبيق",
-						message: error.localizedDescription
-					)
-				}
-			}
-			.confirmationDialog(
-				"اختر طريقة التثبيت",
-				isPresented: $_isLocalInstallChoicePresenting,
-				titleVisibility: .visible
-			) {
-				Button("تحميل وتثبيت مباشر") {
-					_startPendingLocalImports(duplicate: false)
-				}
-				Button("تحميل وتثبيت مكرر") {
-					_startPendingLocalImports(duplicate: true)
-				}
-				Button("إلغاء", role: .cancel) {
-					_discardPendingLocalImports()
-				}
-			} message: {
-				Text("التثبيت المكرر يغيّر معرّف Bundle بإضافة حرفين أو رقمين عشوائيين حتى يمكن تثبيت النسخة بجانب الأصلية.")
+			.sheet(isPresented: $_isImportingPresenting) {
+				FileImporterRepresentableView(
+					allowedContentTypes: [.ipa, .tipa],
+					allowsMultipleSelection: true,
+					onDocumentsPicked: { urls in
+						guard !urls.isEmpty else { return }
+						for url in urls {
+							let id = "BatSignLibraryOnly_\(UUID().uuidString)"
+							let dl = downloadManager.startArchive(from: url, id: id)
+							do {
+								try downloadManager.handlePachageFile(url: url, dl: dl)
+							} catch {
+								Logger.misc.error(
+									"import: \(url.lastPathComponent, privacy: .public) — \(error.localizedDescription, privacy: .public)"
+								)
+								UIAlertController.showAlertWithOk(
+									title: "تعذر استيراد التطبيق",
+									message: "تعذر استيراد \(url.lastPathComponent): \(error.localizedDescription)"
+								)
+							}
+						}
+					}
+				)
+				.ignoresSafeArea()
 			}
 			.alert("استيراد من رابط", isPresented: $_isDownloadingPresenting) {
 				TextField("الرابط", text: $_alertDownloadString)
@@ -232,7 +219,7 @@ struct LibraryView: View {
 				}
 				Button("موافق") {
 					if let url = URL(string: _alertDownloadString) {
-						_ = downloadManager.startDownload(from: url, id: "FeatherManualDownload_\(UUID().uuidString)")
+						_ = downloadManager.startDownload(from: url, id: "BatSignLibraryOnly_\(UUID().uuidString)")
 					}
 				}
 			}
@@ -397,99 +384,6 @@ extension LibraryView {
 		}
 	}
 
-	@MainActor
-	private func _stageLocalImportsAndPresentChoice(_ urls: [URL]) {
-		_pendingLocalImportURLs.removeAll()
-		guard !urls.isEmpty else { return }
-
-		let fm = FileManager.default
-		let stagingRoot = fm.temporaryDirectory
-			.appendingPathComponent("BatSignPickedApps", isDirectory: true)
-
-		do {
-			try fm.createDirectory(at: stagingRoot, withIntermediateDirectories: true)
-		} catch {
-			UIAlertController.showAlertWithOk(
-				title: "تعذر استيراد التطبيق",
-				message: error.localizedDescription
-			)
-			return
-		}
-
-		var staged: [URL] = []
-		for source in urls {
-			let scoped = source.startAccessingSecurityScopedResource()
-			defer {
-				if scoped { source.stopAccessingSecurityScopedResource() }
-			}
-
-			do {
-				let ext = source.pathExtension.isEmpty ? "ipa" : source.pathExtension
-				let destination = stagingRoot
-					.appendingPathComponent(UUID().uuidString)
-					.appendingPathExtension(ext)
-				try fm.copyItem(at: source, to: destination)
-				staged.append(destination)
-			} catch {
-				Logger.misc.error(
-					"import staging: \(source.lastPathComponent, privacy: .public) — \(error.localizedDescription, privacy: .public)"
-				)
-				UIAlertController.showAlertWithOk(
-					title: "تعذر استيراد التطبيق",
-					message: "تعذر تجهيز \(source.lastPathComponent): \(error.localizedDescription)"
-				)
-			}
-		}
-
-		_pendingLocalImportURLs = staged
-		guard !staged.isEmpty else { return }
-
-		// The native fileImporter has already handed us the result. Move the
-		// confirmation to the next main run-loop turn so it never competes
-		// with the document picker's dismissal, without an arbitrary delay.
-		DispatchQueue.main.async {
-			_isLocalInstallChoicePresenting = true
-		}
-	}
-
-	private func _startPendingLocalImports(duplicate: Bool) {
-		let urls = _pendingLocalImportURLs
-		_pendingLocalImportURLs.removeAll()
-
-		for url in urls {
-			let id: String
-			if duplicate {
-				id = "BatSignDuplicate_\(Self._randomBundleSuffix())_\(UUID().uuidString)"
-			} else {
-				id = "BatSignDirect_\(UUID().uuidString)"
-			}
-
-			let dl = downloadManager.startArchive(from: url, id: id)
-			do {
-				try downloadManager.handlePachageFile(url: url, dl: dl)
-			} catch {
-				Logger.misc.error(
-					"import: \(url.lastPathComponent, privacy: .public) — \(error.localizedDescription, privacy: .public)"
-				)
-				UIAlertController.showAlertWithOk(
-					title: "تعذر استيراد التطبيق",
-					message: "تعذر استيراد \(url.lastPathComponent): \(error.localizedDescription)"
-				)
-			}
-		}
-	}
-
-	private func _discardPendingLocalImports() {
-		for url in _pendingLocalImportURLs {
-			try? FileManager.default.removeItem(at: url)
-		}
-		_pendingLocalImportURLs.removeAll()
-	}
-
-	private static func _randomBundleSuffix() -> String {
-		let alphabet = Array("abcdefghijklmnopqrstuvwxyz0123456789")
-		return String((0..<2).compactMap { _ in alphabet.randomElement() })
-	}
 }
 
 // MARK: - Picking several
@@ -698,15 +592,86 @@ extension LibraryView {
 			}
 			.frame(minWidth: 68, minHeight: 30)
 		} else {
-			WSActionButton(title: "تحميل", systemImage: "arrow.down.circle") {
-				if autoSignManager.isAutoSignEnabled {
-					UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-					AutoSignManager.shared.enqueue(app: app, reason: .autoSign)
-				} else {
-					_selectedSigningAppPresenting = AnyApp(base: app)
+			HStack(spacing: 6) {
+				_duplicateMenu(app)
+				WSActionButton(title: "تثبيت") {
+					_signAndInstall(app, bundleSuffix: nil)
 				}
 			}
 		}
+	}
+
+	@ViewBuilder
+	private func _duplicateMenu(_ app: any AppInfoPresentable) -> some View {
+		Menu {
+			Button("نسخة مكررة أولى") { _signAndInstall(app, bundleSuffix: "1") }
+			Button("نسخة مكررة ثانية") { _signAndInstall(app, bundleSuffix: "2") }
+			Button("نسخة مكررة ثالثة") { _signAndInstall(app, bundleSuffix: "3") }
+			Button("نسخة مكررة رابعة") { _signAndInstall(app, bundleSuffix: "4") }
+			Button("نسخة مكررة خامسة") { _signAndInstall(app, bundleSuffix: "5") }
+			Divider()
+			Button("تكرار عشوائي") {
+				_signAndInstall(app, bundleSuffix: Self._randomDuplicateSuffix())
+			}
+		} label: {
+			HStack(spacing: 4) {
+				Text("تكرار")
+				Image(systemName: "chevron.down")
+					.font(.system(size: 9, weight: .bold))
+			}
+			.font(.caption.weight(.bold))
+			.foregroundStyle(.primary)
+			.padding(.horizontal, 12)
+			.frame(minWidth: 68, minHeight: 30)
+			.background {
+				if #available(iOS 26.0, *) {
+					Color.clear
+						.glassEffect(.regular.interactive(), in: Capsule())
+				} else {
+					Capsule().fill(BS.chipFill)
+				}
+			}
+		}
+		.buttonStyle(.plain)
+	}
+
+	private func _signAndInstall(_ app: any AppInfoPresentable, bundleSuffix: String?) {
+		var options = OptionsManager.shared.options
+		options.appIdentifier = nil
+		options.signingOption = .default
+		options.post_installAppAfterSigned = true
+		options.post_deleteAppAfterSigned = false
+
+		if let bundleSuffix {
+			guard let baseIdentifier = app.identifier, !baseIdentifier.isEmpty else {
+				UIAlertController.showAlertWithOk(
+					title: "تعذر إنشاء نسخة مكررة",
+					message: "لا يحتوي التطبيق على Bundle ID صالح للتكرار."
+				)
+				return
+			}
+			options.appIdentifier = baseIdentifier + bundleSuffix
+		}
+
+		UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+		let accepted = AutoSignManager.shared.enqueue(
+			app: app,
+			reason: .autoSign,
+			options: options,
+			force: true
+		)
+
+		if !accepted {
+			UIAlertController.showAlertWithOk(
+				title: "تعذر بدء التثبيت",
+				message: "تعذر إضافة التطبيق إلى قائمة التوقيع."
+			)
+		}
+	}
+
+	private static func _randomDuplicateSuffix() -> String {
+		let alphabet = Array("abcdefghijklmnopqrstuvwxyz0123456789")
+		return String((0..<2).compactMap { _ in alphabet.randomElement() })
 	}
 
 	private func _isInstalling(_ app: any AppInfoPresentable) -> Bool {

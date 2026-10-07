@@ -126,7 +126,8 @@ final class AppFileHandler: NSObject, @unchecked Sendable {
 			}
 		}
 
-		let transferID = _download?.id
+		let transferID = _transferID ?? _download?.id
+		let isLibraryOnlyImport = transferID?.hasPrefix("BatSignLibraryOnly_") ?? false
 		let isAutoUpdateDownload = transferID?.hasPrefix(BatSignAuto.downloadPrefix) ?? false
 		let isManualUpdateDownload = transferID?.hasPrefix(BatSignAuto.manualUpdatePrefix) ?? false
 		let autoIdentifier = bundle?.bundleIdentifier
@@ -134,7 +135,15 @@ final class AppFileHandler: NSObject, @unchecked Sendable {
 		let cardID = _download?.liveID ?? autoIdentifier ?? _uuid
 
 		await MainActor.run {
-			if SourceInstallIntent.handleIfRequested(
+			if isLibraryOnlyImport {
+				LiveStatus.finish(
+					success: true,
+					appName: cardName,
+					detail: "تمت الإضافة إلى المكتبة",
+					appID: cardID
+				)
+				return
+			} else if SourceInstallIntent.handleIfRequested(
 				transferID: transferID,
 				uuid: _uuid,
 				name: cardName,
