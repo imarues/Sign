@@ -301,6 +301,7 @@ struct BSAppList: View {
 							} else {
 								picking.wrappedValue.insert(id)
 							}
+						}
 					} label: {
 						_pickingRow(item, picked: picking.wrappedValue.contains(item.id))
 					}
