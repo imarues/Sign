@@ -1,3 +1,4 @@
+# Final validation trigger after selective 0.0.4 conflict fixes
 name: Test BatSign 0.0.4 Port
 
 on:
