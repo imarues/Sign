@@ -51,21 +51,21 @@ struct BSAppsView: View {
 		return _sources.contains { _viewModel.sources[$0] == nil }
 	}
 
-	/// Rebuild key: the stored sources *and* how many apps each loaded repository
-	/// is currently reporting.
+	/// Rebuild key: the stored sources, their loaded app counts, and the shared
+	/// source-data revision.
 	///
-	/// The second half matters. A cold launch renders before any repository has
-	/// been fetched, and an index built from nothing is empty; `isFinished` is a
-	/// plain property that publishes nothing, so a key made of it alone never
-	/// changed and the empty list stayed empty. Counting each repository's apps
-	/// makes the key move the moment a fetch lands.
+	/// The revision is important even when an updated source contains the same
+	/// number of apps. A count-only key used to leave the previous index/search
+	/// results alive after a refresh whose contents changed but count did not.
 	private var _indexKey: String {
 		let identifiers = _sources.map { $0.identifier ?? $0.sourceURL?.absoluteString ?? "" }
 		let loaded = _sources.map { source -> String in
 			let count = _viewModel.sources[source]?.apps.count ?? -1
 			return "\(source.identifier ?? source.sourceURL?.absoluteString ?? "")#\(count)"
 		}
-		return identifiers.joined(separator: ",") + "||" + loaded.joined(separator: ",")
+		return identifiers.joined(separator: ",")
+			+ "||" + loaded.joined(separator: ",")
+			+ "||revision:\(_viewModel.revision)"
 	}
 
 	var body: some View {
