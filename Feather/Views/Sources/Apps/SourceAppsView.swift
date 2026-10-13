@@ -60,19 +60,16 @@ struct SourceAppsView: View {
 		}
 	}
 
-	/// Built from the same index the Apps tab uses, then narrowed by the search
-	/// field and ordered by the sort menu. Filtering is a plain loop over an
-	/// already-flattened array — no repository is walked per keystroke.
+	/// Built from the same complete index the Apps tab uses. Search is delegated
+	/// to `BSAppIndex` too, so source search and global search use identical
+	/// normalization, relevance ranking and fallback handling for missing bundle
+	/// identifiers.
 	private var _items: [BSAppItem] {
 		var items = BSAppIndex.build(sources: object, repositories: viewModel.sources)
 
 		let query = _searchText.trimmingCharacters(in: .whitespacesAndNewlines)
 		if !query.isEmpty {
-			items = items.filter {
-				$0.app.currentName.localizedCaseInsensitiveContains(query)
-					|| ($0.app.developer ?? "").localizedCaseInsensitiveContains(query)
-					|| ($0.app.category ?? "").localizedCaseInsensitiveContains(query)
-			}
+			items = BSAppIndex.filter(items, query: query, limit: items.count)
 		}
 
 		switch _sortOption {
@@ -216,6 +213,9 @@ struct SourceAppsView: View {
 			_load()
 		}
 		.onChange(of: viewModel.isFinished) { _ in
+			_load()
+		}
+		.onChange(of: viewModel.revision) { _ in
 			_load()
 		}
 		.onChange(of: _sortOption) { newValue in
