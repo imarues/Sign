@@ -56,7 +56,7 @@ private enum SourceAppsSearchEngine {
 		matches.reserveCapacity(min(records.count, max(limit, 64)))
 
 		for record in records {
-			guard !Task.isCancelled else { return [] }
+			guard !Task<Never, Never>.isCancelled else { return [] }
 			guard tokens.allSatisfy({ record.haystack.contains($0) }) else { continue }
 
 			var score = 0
@@ -314,13 +314,9 @@ struct SourceAppsView: View {
 			return SourceRepositoryContext(sourceURL: source.sourceURL, repository: repository)
 		}
 
-		// Do not turn a still-loading source into a temporary empty catalogue.
 		guard loadedSources.count == object.count || viewModel.isFinished else { return }
 		_sourceContexts = loadedSources
 
-		// This used to live in a computed property, so SwiftUI rebuilt every app
-		// on every keystroke and every body refresh. Large repositories such as
-		// IPA Strong made that CPU/memory churn explode. Build once per revision.
 		let items = BSAppIndex.build(sources: object, repositories: viewModel.sources)
 		_catalogueItems = items
 
@@ -331,8 +327,6 @@ struct SourceAppsView: View {
 		}
 		_itemsByID = byID
 
-		// Create the immutable string-only search index once. App descriptions are
-		// intentionally excluded because some sources carry very large text blobs.
 		_searchIndex = SourceAppsSearchEngine.makeRecords(from: items)
 		_refreshDisplayed()
 	}
@@ -364,14 +358,12 @@ struct SourceAppsView: View {
 			return
 		}
 
-		// Drop the huge unfiltered list immediately while typing. This keeps
-		// SwiftUI from repeatedly diffing thousands of rows behind the keyboard.
 		_isFiltering = true
 		_items = []
 
 		let worker = Task.detached(priority: .userInitiated) { () -> [String] in
-			try? await Task.sleep(nanoseconds: 90_000_000)
-			guard !Task.isCancelled else { return [] }
+			try? await Task<Never, Never>.sleep(nanoseconds: 90_000_000)
+			guard !Task<Never, Never>.isCancelled else { return [] }
 			return SourceAppsSearchEngine.search(records, query: trimmed)
 		}
 		_searchWorker = worker
