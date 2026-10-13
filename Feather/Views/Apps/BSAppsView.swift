@@ -5,10 +5,6 @@
 //  BatSign's Apps surface: every app from every source, in BatSign's row shape,
 //  with the same list backing the search tab.
 //
-//  Indexing is the whole performance story here. The list of every app is built
-//  once whenever the source set changes and then filtered in a loop, instead of
-//  being rebuilt from every repository on every keystroke.
-//
 
 import SwiftUI
 import CoreData
@@ -16,8 +12,6 @@ import AltSourceKit
 import NimbleViews
 
 struct BSAppsView: View {
-	/// The tab it is standing in. The list is the same one; only the heading
-	/// differs, so search and the catalogue can never show different rows.
 	var title: String = "Apps"
 
 	@StateObject private var _viewModel = SourcesViewModel.shared
@@ -28,35 +22,27 @@ struct BSAppsView: View {
 		animation: .snappy
 	) private var _sources: FetchedResults<AltSource>
 
-	/// The flattened catalogue, rebuilt whenever the sources themselves change.
 	@State private var _index: [BSAppItem] = []
 	@State private var _isIndexing = true
 	@State private var _query = ""
-	@State private var _results: [BSAppItem] = []
-	@State private var _searchTask: Task<Void, Never>?
-
-	private var _isSearching: Bool {
-		!_query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-	}
 
 	private var _displayed: [BSAppItem] {
-		_isSearching ? _results : _index
+		let query = _query.trimmingCharacters(in: .whitespacesAndNewlines)
+		guard !query.isEmpty else { return _index }
+
+		// Keep global Apps search on the same actor/path as SourceAppsView.
+		// BSAppItem contains AltSource (a Core Data managed object), so passing the
+		// catalogue through Task.detached is unsafe and behaved differently on
+		// iOS 26. Filtering synchronously also makes global and per-source search
+		// use exactly the same proven code path.
+		return BSAppIndex.filter(_index, query: query)
 	}
 
-	/// A source that has not been fetched yet is not an empty store. While any
-	/// repository is still missing there is nothing honest to say, so the page
-	/// keeps its spinner instead of claiming there are no apps.
 	private var _isLoadingCatalogue: Bool {
 		guard _index.isEmpty, !_sources.isEmpty else { return false }
 		return _sources.contains { _viewModel.sources[$0] == nil }
 	}
 
-	/// Rebuild key: the stored sources, their loaded app counts, and the shared
-	/// source-data revision.
-	///
-	/// The revision is important even when an updated source contains the same
-	/// number of apps. A count-only key used to leave the previous index/search
-	/// results alive after a refresh whose contents changed but count did not.
 	private var _indexKey: String {
 		let identifiers = _sources.map { $0.identifier ?? $0.sourceURL?.absoluteString ?? "" }
 		let loaded = _sources.map { source -> String in
@@ -111,18 +97,12 @@ struct BSAppsView: View {
 				placement: .navigationBarDrawer(displayMode: .always),
 				prompt: Text("Apps, developers")
 			)
-			// No "+" here, and none on Search: a source is added from the Sources
-			// tab's own top-right button and nowhere else, so the two catalogue
-			// surfaces stay read-only.
 			.refreshable {
 				await _viewModel.fetchSources(_sources, refresh: true)
 			}
 		}
 		.task(id: _indexKey) {
 			await _buildIndex()
-		}
-		.onChange(of: _query) { newValue in
-			_debouncedSearch(newValue)
 		}
 	}
 
@@ -139,11 +119,6 @@ struct BSAppsView: View {
 
 		let sources = Array(_sources)
 
-		// A cold launch straight into this tab has nothing loaded, and
-		// `isFinished` is `true` whenever nothing is in flight — so asking it
-		// whether to fetch is asking the wrong question. Ask the data instead:
-		// any source with no repository yet means there is something to fetch.
-		// `fetchSources` is idempotent and already guards against overlap.
 		if sources.contains(where: { _viewModel.sources[$0] == nil }) {
 			await _viewModel.fetchSources(_sources)
 		}
@@ -151,54 +126,14 @@ struct BSAppsView: View {
 		let key = _indexKey
 		if let cached = BSAppIndex.cached(for: key) {
 			_index = cached
-			if _isSearching {
-				_results = BSAppIndex.filter(cached, query: _query.trimmingCharacters(in: .whitespacesAndNewlines))
-			}
 			return
 		}
 
-		// Built on the main actor and not in a detached task. `sources` holds
-		// viewContext objects and `build` looks each one up in the repositories
-		// dictionary, so that lookup and the `sourceURL` read have to happen where
-		// those objects live. The rest of `build` is work over the already-decoded
-		// `ASRepository` values, and it is the same build `SourceAppsView` runs
-		// synchronously for a single source's page.
 		let items = BSAppIndex.build(sources: sources, repositories: _viewModel.sources)
 
-		// An empty catalogue for a source that has simply not finished loading is
-		// not a result worth remembering.
 		if !items.isEmpty || sources.isEmpty {
 			BSAppIndex.cache(items, for: key)
 		}
 		_index = items
-
-		if _isSearching {
-			_results = BSAppIndex.filter(items, query: _query.trimmingCharacters(in: .whitespacesAndNewlines))
-		}
-	}
-
-	/// Typing does not filter on the keystroke itself. A short pause is waited
-	/// out first, so a fast typist produces one filter rather than six.
-	private func _debouncedSearch(_ text: String) {
-		_searchTask?.cancel()
-
-		let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-		guard !trimmed.isEmpty else {
-			_results = []
-			return
-		}
-
-		let index = _index
-		_searchTask = Task {
-			try? await Task.sleep(nanoseconds: 120_000_000)
-			guard !Task.isCancelled else { return }
-
-			let matches = await Task.detached(priority: .userInitiated) {
-				BSAppIndex.filter(index, query: trimmed)
-			}.value
-
-			guard !Task.isCancelled else { return }
-			_results = matches
-		}
 	}
 }
