@@ -56,10 +56,30 @@ struct SourceAppsTableRepresentableView: UIViewRepresentable {
 		return tableView
 	}
 	
+	private static func _sourceSignature(for source: SourceAppsView.SourceRepositoryContext) -> String {
+		let apps = source.repository.apps.map { app in
+			[
+				app.id ?? "",
+				app.name ?? "",
+				app.description ?? "",
+				app.subtitle ?? "",
+				app.currentVersion ?? ""
+			].joined(separator: "\u{1f}")
+		}.joined(separator: "\u{1e}")
+
+		return [
+			source.sourceURL?.absoluteString ?? "",
+			String(source.repository.news?.count ?? 0),
+			apps
+		].joined(separator: "\u{1d}")
+	}
+
 	func updateUIView(_ tableView: UITableView, context: Context) {
 		context.coordinator.uiTableView = tableView
 		
-		let sourcesChanged = context.coordinator.sourceContexts != sourceContexts
+		let previousSourceSignatures = context.coordinator.sourceContexts.map { Self._sourceSignature(for: $0) }
+		let updatedSourceSignatures = sourceContexts.map { Self._sourceSignature(for: $0) }
+		let sourcesChanged = previousSourceSignatures != updatedSourceSignatures
 		let searchChanged = context.coordinator.searchText != searchText
 		let sortOptionChanged = context.coordinator.sortOption != sortOption
 		let sortDirectionChanged = context.coordinator.sortAscending != sortAscending
