@@ -2,19 +2,120 @@
 //  SourceAppsView.swift
 //  Feather
 //
-//  One source's catalogue. It is drawn exactly like the Apps tab — the same
-//  rows, the same pill, the same large title that collapses on scroll — so a
-//  source's page and the catalogue can never look like two different apps.
-//
-//  It used to be a UIKit table with `ignoresSafeArea`, which is why it read as
-//  the old design and why going into it had none of the standard navigation
-//  behaviour. This is the same data on the storefront's own components.
+//  One source's catalogue. Large sources are indexed once and searched through
+//  a lightweight string snapshot so typing never rebuilds the repository.
 //
 
 import SwiftUI
 import AltSourceKit
 import NimbleViews
 import UIKit
+
+// MARK: - Lightweight per-source search
+
+private struct SourceAppsSearchRecord: Sendable {
+	let id: String
+	let name: String
+	let bundle: String
+	let developer: String
+	let category: String
+	let subtitle: String
+	let haystack: String
+}
+
+private enum SourceAppsSearchEngine {
+	static func makeRecords(from items: [BSAppItem]) -> [SourceAppsSearchRecord] {
+		items.map { item in
+			let name = _normalized(item.app.currentName)
+			let bundle = _normalized(item.app.id ?? "")
+			let developer = _normalized(item.app.developer ?? "")
+			let category = _normalized(item.app.category ?? "")
+			let subtitle = _normalized(item.app.subtitle ?? "")
+			let haystack = [name, bundle, developer, category, subtitle]
+				.filter { !$0.isEmpty }
+				.joined(separator: " ")
+
+			return SourceAppsSearchRecord(
+				id: item.id,
+				name: name,
+				bundle: bundle,
+				developer: developer,
+				category: category,
+				subtitle: subtitle,
+				haystack: haystack
+			)
+		}
+	}
+
+	static func search(_ records: [SourceAppsSearchRecord], query: String, limit: Int = 200) -> [String] {
+		let wanted = _normalized(query)
+		guard !wanted.isEmpty, limit > 0 else { return [] }
+
+		let tokens = wanted.split(separator: " ").map(String.init)
+		var matches: [(score: Int, name: String, id: String)] = []
+		matches.reserveCapacity(min(records.count, max(limit, 64)))
+
+		for record in records {
+			guard !Task.isCancelled else { return [] }
+			guard tokens.allSatisfy({ record.haystack.contains($0) }) else { continue }
+
+			var score = 0
+			if record.name == wanted { score += 100_000 }
+			else if record.name.hasPrefix(wanted) { score += 90_000 }
+			else if _wordStarts(record.name, with: wanted) { score += 85_000 }
+			else if record.name.contains(wanted) { score += 80_000 }
+
+			if record.bundle == wanted { score += 70_000 }
+			else if record.bundle.hasPrefix(wanted) { score += 55_000 }
+			else if record.bundle.contains(wanted) { score += 45_000 }
+
+			if record.developer == wanted { score += 35_000 }
+			else if record.developer.hasPrefix(wanted) { score += 30_000 }
+			else if record.developer.contains(wanted) { score += 25_000 }
+
+			if record.category == wanted { score += 18_000 }
+			else if record.category.contains(wanted) { score += 12_000 }
+			if record.subtitle.contains(wanted) { score += 10_000 }
+
+			for token in tokens {
+				if record.name.hasPrefix(token) { score += 2_000 }
+				else if _wordStarts(record.name, with: token) { score += 1_700 }
+				else if record.name.contains(token) { score += 1_300 }
+				else if record.bundle.contains(token) { score += 700 }
+				else if record.developer.contains(token) { score += 350 }
+				else if record.category.contains(token) { score += 180 }
+				else { score += 50 }
+			}
+
+			matches.append((score, record.name, record.id))
+		}
+
+		matches.sort { lhs, rhs in
+			if lhs.score != rhs.score { return lhs.score > rhs.score }
+			if lhs.name != rhs.name { return lhs.name < rhs.name }
+			return lhs.id < rhs.id
+		}
+
+		return Array(matches.prefix(limit).map(\.id))
+	}
+
+	private static func _wordStarts(_ text: String, with query: String) -> Bool {
+		text.split(separator: " ").contains { $0.hasPrefix(query) }
+	}
+
+	private static func _normalized(_ raw: String) -> String {
+		let folded = raw.folding(
+			options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive],
+			locale: .current
+		)
+		let cleaned = folded.map { character -> Character in
+			(character.isLetter || character.isNumber) ? character : " "
+		}
+		return String(cleaned)
+			.split(whereSeparator: { $0.isWhitespace })
+			.joined(separator: " ")
+	}
+}
 
 // MARK: - Sort
 extension SourceAppsView {
@@ -41,16 +142,24 @@ struct SourceAppsView: View {
 	@State private var _sortOption: SortOption = .default
 	@State private var _searchText = ""
 	@State private var _sourceContexts: [SourceRepositoryContext]?
+	@State private var _catalogueItems: [BSAppItem] = []
+	@State private var _items: [BSAppItem] = []
+	@State private var _itemsByID: [String: BSAppItem] = [:]
+	@State private var _searchIndex: [SourceAppsSearchRecord] = []
+	@State private var _searchWorker: Task<[String], Never>?
+	@State private var _isFiltering = false
 
 	@ObservedObject private var _bulk = BSBulkSign.shared
 
-	/// Whether apps are being picked to fetch and sign as one run.
 	@State private var _isSelecting = false
-	/// The picked apps, by the catalogue's own row id.
 	@State private var _selection: Set<String> = []
 
 	var object: [AltSource]
 	@ObservedObject var viewModel: SourcesViewModel
+
+	private var _trimmedSearch: String {
+		_searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+	}
 
 	private var _navigationTitle: String {
 		if object.count == 1 {
@@ -60,37 +169,6 @@ struct SourceAppsView: View {
 		}
 	}
 
-	/// Built from the same complete index the Apps tab uses. Search is delegated
-	/// to `BSAppIndex` too, so source search and global search use identical
-	/// normalization, relevance ranking and fallback handling for missing bundle
-	/// identifiers.
-	private var _items: [BSAppItem] {
-		var items = BSAppIndex.build(sources: object, repositories: viewModel.sources)
-
-		let query = _searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-		if !query.isEmpty {
-			items = BSAppIndex.filter(items, query: query, limit: items.count)
-		}
-
-		switch _sortOption {
-		case .default:
-			break
-		case .name:
-			items.sort {
-				$0.app.currentName.localizedCaseInsensitiveCompare($1.app.currentName) == .orderedAscending
-			}
-		case .date:
-			items.sort {
-				($0.app.currentDate?.date ?? .distantPast) < ($1.app.currentDate?.date ?? .distantPast)
-			}
-		}
-
-		if _sortOption != .default, !_sortAscending {
-			items.reverse()
-		}
-		return items
-	}
-
 	// MARK: Body
 	var body: some View {
 		Group {
@@ -98,25 +176,26 @@ struct SourceAppsView: View {
 				ProgressView()
 					.frame(maxWidth: .infinity, maxHeight: .infinity)
 			} else if _items.isEmpty {
-				ScrollView {
-					WSEmptyState(
-						icon: "square.grid.2x2",
-						title: _searchText.isEmpty ? "No Apps" : "No Matches",
-						message: _searchText.isEmpty
-							? "This source has not published any apps yet."
-							: "No app matches “\(_searchText)”."
-					)
-					.padding(.horizontal, 16)
-					.padding(.top, 40)
+				if _isFiltering && !_trimmedSearch.isEmpty {
+					ProgressView()
+						.frame(maxWidth: .infinity, maxHeight: .infinity)
+				} else {
+					ScrollView {
+						WSEmptyState(
+							icon: _trimmedSearch.isEmpty ? "square.grid.2x2" : "magnifyingglass",
+							title: _trimmedSearch.isEmpty ? "No Apps" : "No Matches",
+							message: _trimmedSearch.isEmpty
+								? "This source has not published any apps yet."
+								: "No app matches “\(_searchText)”."
+						)
+						.padding(.horizontal, 16)
+						.padding(.top, 40)
+					}
 				}
 			} else {
 				ScrollView {
 					VStack(alignment: .leading, spacing: 16) {
-						// The run, above the catalogue it was picked from. A source's
-						// apps are the usual place a multi-sign run starts, and the
-						// progress belongs on the screen the person is still looking at.
 						BSBulkSignStrip()
-
 						BSAppList(items: _items, picking: _isSelecting ? $_selection : nil)
 					}
 					.padding(.top, 4)
@@ -140,9 +219,6 @@ struct SourceAppsView: View {
 		.animation(.snappy(duration: 0.22), value: _isSelecting)
 		.navigationTitle(_navigationTitle)
 		.navigationBarTitleDisplayMode(.large)
-		// The Sources tab hides its own bar so its masthead can lead. A pushed
-		// page has to say so explicitly, or it inherits that hidden bar and
-		// arrives with no back button.
 		.toolbar(.visible, for: .navigationBar)
 		.searchable(
 			text: $_searchText,
@@ -185,10 +261,7 @@ struct SourceAppsView: View {
 		}
 		.toolbar {
 			ToolbarItem(placement: .topBarLeading) {
-				if !_items.isEmpty {
-					// One word, in the corner the system puts it in: this screen has
-					// one mode the other screens do not, and picking several apps to
-					// fetch and sign at once is it.
+				if !_items.isEmpty && !_isFiltering {
 					Button(_isSelecting ? "Done" : "Select") {
 						BSHaptics.tap()
 						withAnimation(.snappy(duration: 0.22)) {
@@ -218,30 +291,126 @@ struct SourceAppsView: View {
 		.onChange(of: viewModel.revision) { _ in
 			_load()
 		}
+		.onChange(of: _searchText) { newValue in
+			_scheduleSearch(newValue)
+		}
 		.onChange(of: _sortOption) { newValue in
 			_sortOptionRawValue = newValue.rawValue
+			_refreshDisplayed()
+		}
+		.onChange(of: _sortAscending) { _ in
+			_refreshDisplayed()
+		}
+		.onDisappear {
+			_searchWorker?.cancel()
 		}
 	}
+
+	// MARK: Loading/indexing
 
 	private func _load() {
 		let loadedSources = object.compactMap { source -> SourceRepositoryContext? in
 			guard let repository = viewModel.sources[source] else { return nil }
 			return SourceRepositoryContext(sourceURL: source.sourceURL, repository: repository)
 		}
+
+		// Do not turn a still-loading source into a temporary empty catalogue.
+		guard loadedSources.count == object.count || viewModel.isFinished else { return }
 		_sourceContexts = loadedSources
+
+		// This used to live in a computed property, so SwiftUI rebuilt every app
+		// on every keystroke and every body refresh. Large repositories such as
+		// IPA Strong made that CPU/memory churn explode. Build once per revision.
+		let items = BSAppIndex.build(sources: object, repositories: viewModel.sources)
+		_catalogueItems = items
+
+		var byID: [String: BSAppItem] = [:]
+		byID.reserveCapacity(items.count)
+		for item in items {
+			byID[item.id] = item
+		}
+		_itemsByID = byID
+
+		// Create the immutable string-only search index once. App descriptions are
+		// intentionally excluded because some sources carry very large text blobs.
+		_searchIndex = SourceAppsSearchEngine.makeRecords(from: items)
+		_refreshDisplayed()
 	}
 
-	struct SourceRepositoryContext: Equatable {
+	private func _refreshDisplayed() {
+		if _trimmedSearch.isEmpty {
+			_searchWorker?.cancel()
+			_isFiltering = false
+			_items = _sorted(_catalogueItems)
+		} else {
+			_scheduleSearch(_searchText)
+		}
+	}
+
+	private func _scheduleSearch(_ text: String) {
+		_searchWorker?.cancel()
+
+		let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+		guard !trimmed.isEmpty else {
+			_isFiltering = false
+			_items = _sorted(_catalogueItems)
+			return
+		}
+
+		let records = _searchIndex
+		guard !records.isEmpty else {
+			_isFiltering = false
+			_items = []
+			return
+		}
+
+		// Drop the huge unfiltered list immediately while typing. This keeps
+		// SwiftUI from repeatedly diffing thousands of rows behind the keyboard.
+		_isFiltering = true
+		_items = []
+
+		let worker = Task.detached(priority: .userInitiated) { () -> [String] in
+			try? await Task.sleep(nanoseconds: 90_000_000)
+			guard !Task.isCancelled else { return [] }
+			return SourceAppsSearchEngine.search(records, query: trimmed)
+		}
+		_searchWorker = worker
+
+		Task { @MainActor in
+			let ids = await worker.value
+			guard !worker.isCancelled else { return }
+			guard _searchText.trimmingCharacters(in: .whitespacesAndNewlines) == trimmed else { return }
+
+			let matches = ids.compactMap { _itemsByID[$0] }
+			_items = _sorted(matches)
+			_isFiltering = false
+		}
+	}
+
+	private func _sorted(_ input: [BSAppItem]) -> [BSAppItem] {
+		guard _sortOption != .default else { return input }
+		var items = input
+
+		switch _sortOption {
+		case .default:
+			break
+		case .name:
+			items.sort {
+				$0.app.currentName.localizedCaseInsensitiveCompare($1.app.currentName) == .orderedAscending
+			}
+		case .date:
+			items.sort {
+				($0.app.currentDate?.date ?? .distantPast) < ($1.app.currentDate?.date ?? .distantPast)
+			}
+		}
+
+		if !_sortAscending { items.reverse() }
+		return items
+	}
+
+	struct SourceRepositoryContext {
 		let sourceURL: URL?
 		let repository: ASRepository
-
-		static func == (lhs: SourceRepositoryContext, rhs: SourceRepositoryContext) -> Bool {
-			lhs.sourceURL == rhs.sourceURL &&
-			lhs.repository.id == rhs.repository.id &&
-			lhs.repository.name == rhs.repository.name &&
-			lhs.repository.apps.map { "\($0.currentUniqueId)|\($0.currentVersion ?? "")" } ==
-			rhs.repository.apps.map { "\($0.currentUniqueId)|\($0.currentVersion ?? "")" }
-		}
 	}
 
 	struct SourceAppRoute: Identifiable, Hashable {
@@ -263,13 +432,6 @@ extension SourceAppsView {
 		_selection.count == 1 ? "Download & Sign 1 App" : "Download & Sign \(_selection.count) Apps"
 	}
 
-	/// One run: every picked app is fetched and signed, one after another.
-	///
-	/// The transfers are the app's own download pipeline and the signing is the
-	/// app's own queue, so what a single app does when it is fetched from a
-	/// source — import, sign, install, live card, outcome popup — is exactly what
-	/// each app of the run does. What is different is only that they run in turn
-	/// and report their place in the run while they do.
 	private func _startBulkDownload() {
 		let items = _pickedItems
 		guard !items.isEmpty else { return }
