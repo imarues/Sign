@@ -1,0 +1,110 @@
+name: Apply BatSign 0.0.4 Conflict Fixes
+
+on:
+  push:
+    branches: [port-batsign-0.0.4]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: port-batsign-0.0.4
+
+      - name: Apply selective upstream fixes
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_required(path, old, new, already=None):
+              p = Path(path)
+              text = p.read_text()
+              if old in text:
+                  p.write_text(text.replace(old, new, 1))
+                  print(f"patched {path}")
+                  return
+              if already and already in text:
+                  print(f"already patched {path}")
+                  return
+              raise SystemExit(f"expected text not found in {path}")
+
+          app = 'Feather/Utilities/Handlers/AppFileHandler.swift'
+          replace_required(
+              app,
+              '''\t\tguard let entryNames = _zipEntryNames(in: url) else {\n\t\t\tLogger.misc.warning("Skipped archive entry validation for \\(url.lastPathComponent, privacy: .public)")\n\t\t\treturn\n\t\t}''',
+              '''\t\tguard let entryNames = _zipEntryNames(in: url) else {\n\t\t\t// Unpacking without a readable central directory skips the path\n\t\t\t// traversal check, so malformed archives must fail closed.\n\t\t\tthrow ImportedFileHandlerError.unreadablePackage(url.lastPathComponent)\n\t\t}''',
+              'malformed archives must fail closed'
+          )
+          replace_required(
+              app,
+              '\t\tguard _uint32(directory, 0) == 0x02014b50 else { return nil }',
+              '\t\tguard !directory.isEmpty, _uint32(directory, 0) == 0x02014b50 else { return nil }',
+              'guard !directory.isEmpty, _uint32(directory, 0) == 0x02014b50'
+          )
+          replace_required(
+              app,
+              '''\t\twhile offset + 46 <= directory.count {\n\t\t\tguard _uint32(directory, offset) == 0x02014b50 else { break }''',
+              '''\t\twhile offset < directory.count {\n\t\t\tguard\n\t\t\t\toffset + 46 <= directory.count,\n\t\t\t\t_uint32(directory, offset) == 0x02014b50\n\t\t\telse {\n\t\t\t\treturn nil\n\t\t\t}''',
+              'while offset < directory.count'
+          )
+          replace_required(
+              app,
+              '\t\t\t\toffset + 46 + nameLength <= directory.count',
+              '\t\t\t\t46 + nameLength + extraLength + commentLength <= directory.count - offset',
+              '46 + nameLength + extraLength + commentLength <= directory.count - offset'
+          )
+          replace_required(
+              app,
+              '''\t\t\telse {\n\t\t\t\treturn nil\n\t\t\t}\n\n\t\t\tlet nameData = directory.subdata(in: (offset + 46)..<(offset + 46 + nameLength))''',
+              '''\t\t\telse {\n\t\t\t\treturn nil\n\t\t\t}\n\t\t\tlet recordLength = 46 + nameLength + extraLength + commentLength\n\n\t\t\tlet nameData = directory.subdata(in: (offset + 46)..<(offset + 46 + nameLength))''',
+              'let recordLength = 46 + nameLength + extraLength + commentLength'
+          )
+          replace_required(
+              app,
+              '''\t\t\toffset += 46 + nameLength + extraLength + commentLength\n\t\t}\n\t\treturn names''',
+              '''\t\t\toffset += recordLength\n\t\t}\n\t\tguard offset == directory.count else { return nil }\n\t\treturn names''',
+              'guard offset == directory.count else { return nil }'
+          )
+
+          store = 'Feather/Views/Common/BSStore.swift'
+          replace_required(
+              store,
+              '\t\t\twideBanner = await BSArtwork.shared.isWide(candidate) ? candidate : nil',
+              '''\t\t\t// Render the source artwork immediately; do not gate the card on a separate probe.\n\t\t\twideBanner = candidate''',
+              'wideBanner = candidate'
+          )
+
+          library = 'Feather/Views/Library/LibraryView.swift'
+          replace_required(
+              library,
+              '\t\t\t.animation(.snappy(duration: 0.22), value: _isSelecting)\n\t\t\t.navigationTitle(.localized("Library"))',
+              '''\t\t\t.animation(.snappy(duration: 0.22), value: _isSelecting)\n\t\t\t.onChange(of: _searchText) { _ in\n\t\t\t\t_selection.removeAll()\n\t\t\t}\n\t\t\t.onChange(of: _selectedScope) { _ in\n\t\t\t\t_selection.removeAll()\n\t\t\t}\n\t\t\t.navigationTitle(.localized("Library"))''',
+              '.onChange(of: _selectedScope)'
+          )
+
+          # The fork already has an enhanced version of the upstream shared-fetch fix.
+          sources = Path('Feather/Views/Sources/SourcesViewModel.swift').read_text()
+          assert '_fetchTask' in sources and 'await _fetchTask?.value' in sources
+
+          # The indexing fix is already ported manually.
+          apps = Path('Feather/Views/Apps/BSAppsView.swift').read_text()
+          assert '_isIndexing = true' in apps and 'defer { _isIndexing = false }' in apps
+          PY
+
+      - name: Commit selective fixes
+        run: |
+          if git diff --quiet; then
+            echo "No changes needed"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Feather/Utilities/Handlers/AppFileHandler.swift Feather/Views/Common/BSStore.swift Feather/Views/Library/LibraryView.swift
+          git commit -m "Port remaining BatSign 0.0.4 conflict fixes"
+          git push origin HEAD:port-batsign-0.0.4
