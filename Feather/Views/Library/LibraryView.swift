@@ -137,6 +137,12 @@ struct LibraryView: View {
 				}
 			}
 			.animation(.snappy(duration: 0.22), value: _isSelecting)
+			.onChange(of: _searchText) { _ in
+				_selection.removeAll()
+			}
+			.onChange(of: _selectedScope) { _ in
+				_selection.removeAll()
+			}
 			.navigationTitle(.localized("Library"))
 			.navigationBarTitleDisplayMode(.large)
 			.toolbar {

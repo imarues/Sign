@@ -153,7 +153,8 @@ struct BSStoryCard: View {
 				wideBanner = nil
 				return
 			}
-			wideBanner = await BSArtwork.shared.isWide(candidate) ? candidate : nil
+			// Render the source artwork immediately; do not gate the card on a separate probe.
+			wideBanner = candidate
 		}
 		.task(id: app.iconURL) {
 			guard iconTint == nil, let icon = app.iconURL else { return }
