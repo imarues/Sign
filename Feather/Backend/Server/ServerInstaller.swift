@@ -17,7 +17,10 @@ import IDeviceSwift
 // MARK: - Class
 class ServerInstaller: Identifiable, ObservableObject {
 	let id = UUID()
-	let port = Int.random(in: 4000...8000)
+	// NeoSign's GBox backup manifest points its software-package back to the
+	// fixed loopback install service on port 8881. Keep this exact port rather
+	// than choosing a random one, otherwise the GBox manifest cannot reach us.
+	let port = 8881
 	private var _needsShutdown = false
 	
 	var packageUrl: URL?
