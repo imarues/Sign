@@ -27,6 +27,21 @@ extension ServerInstaller {
 			?? URL(fileURLWithPath: path)
 	}
 
+	private var manifestName: String {
+		let value = app.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+		return value.isEmpty ? "App" : value
+	}
+
+	private var manifestIdentifier: String? {
+		let value = app.identifier?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+		return value.isEmpty ? nil : value
+	}
+
+	private var manifestVersion: String {
+		let value = app.version?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+		return value.isEmpty ? "1.0" : value
+	}
+
 	/// NeoSign's GBox backup manifest expects the signed IPA to be available from
 	/// its fixed loopback service at 127.0.0.1:8881/app.ipa. The ServerInstaller
 	/// port is fixed to 8881 to match that protocol.
@@ -37,18 +52,21 @@ extension ServerInstaller {
 	/// NeoSign 5.2.0 builds the GBox backup manifest filename from:
 	///     unpaddedBase64("<name>/<bundle-id>/<version>") + ".plist"
 	/// and prefixes it with backup_install_manifest_base_url, whose default is
-	/// https://test.gbox.run/. This is the actual GBox backup path; /manifest.php
-	/// belongs to NeoSign's separate cert_api_base_url and is deliberately not
-	/// used here.
+	/// https://test.gbox.run/.
+	///
+	/// Do not interpolate AppInfoPresentable optionals directly here. Swift turns
+	/// an optional String into text such as Optional("1Contact"), which changes
+	/// the Base64 key and makes GBox generate an invalid manifest/title.
 	var gboxManifestEndpoint: URL? {
-		let identifier = app.identifier ?? ""
-		let descriptor = "\(app.name)/\(identifier)/\(app.version)"
+		guard let identifier = manifestIdentifier else { return nil }
+		let descriptor = "\(manifestName)/\(identifier)/\(manifestVersion)"
 		let base64 = Data(descriptor.utf8)
 			.base64EncodedString()
 			.trimmingCharacters(in: CharacterSet(charactersIn: "="))
 
-		// Encode Base64 punctuation so '/' or '+' can never be interpreted as
-		// another URL path level.
+		// Keep the Base64 value as one URL path component. Percent-encoding only
+		// protects punctuation that would otherwise be interpreted as URL syntax;
+		// the server receives the decoded Base64 filename.
 		var allowed = CharacterSet.alphanumerics
 		allowed.insert(charactersIn: "-._~")
 		guard let encoded = base64.addingPercentEncoding(withAllowedCharacters: allowed) else {
@@ -137,30 +155,33 @@ extension ServerInstaller {
 		"""
 	}
 
-	var installManifest: [String: Any] {[
-		"items": [[
-			"assets": [
-				[
-					"kind": "software-package",
-					"url": payloadEndpoint.absoluteString,
+	var installManifest: [String: Any] {
+		guard let identifier = manifestIdentifier else { return [:] }
+		return [
+			"items": [[
+				"assets": [
+					[
+						"kind": "software-package",
+						"url": payloadEndpoint.absoluteString,
+					],
+					[
+						"kind": "display-image",
+						"url": displayImageSmallEndpoint.absoluteString,
+					],
+					[
+						"kind": "full-size-image",
+						"url": displayImageLargeEndpoint.absoluteString,
+					],
 				],
-				[
-					"kind": "display-image",
-					"url": displayImageSmallEndpoint.absoluteString,
+				"metadata": [
+					"bundle-identifier": identifier,
+					"bundle-version": manifestVersion,
+					"kind": "software",
+					"title": manifestName,
 				],
-				[
-					"kind": "full-size-image",
-					"url": displayImageLargeEndpoint.absoluteString,
-				],
-			],
-			"metadata": [
-				"bundle-identifier": app.identifier,
-				"bundle-version": app.version,
-				"kind": "software",
-				"title": app.name,
-			],
-		],],
-	]}
+			]],
+		]
+	}
 
 	var installManifestData: Data {
 		(try? PropertyListSerialization.data(
