@@ -69,7 +69,14 @@ extension ServerInstaller {
 
 		app.http.server.configuration.hostname = sni()
 		app.http.server.configuration.tcpNoDelay = true
-		app.http.server.configuration.address = .hostname("0.0.0.0", port: port)
+
+		// GBox mode never needs LAN access: the manifest points back to the same
+		// iPhone at 127.0.0.1. Binding every interface (0.0.0.0) makes iOS treat
+		// this as a local-network listener and can fail with EPERM / NIOCore
+		// IOError before the install request is even sent. Keep the listener on
+		// loopback only. Semi-local mode retains its previous all-interface bind.
+		let bindHost = getServerMethod() == 0 ? "127.0.0.1" : "0.0.0.0"
+		app.http.server.configuration.address = .hostname(bindHost, port: port)
 		app.http.server.configuration.port = port
 		app.routes.defaultMaxBodySize = "128mb"
 		app.routes.caseInsensitive = false
