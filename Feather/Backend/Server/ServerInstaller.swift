@@ -18,7 +18,9 @@ import IDeviceSwift
 // MARK: - Class
 class ServerInstaller: Identifiable, ObservableObject {
 	let id = UUID()
-	let port = 8881
+	// GBox 6.1.3 starts its local HTTP server on 9800 before opening
+	// https://i.gbox.run/install.plist. Keep the same fixed port.
+	let port = 9800
 	private var _needsShutdown = false
 
 	var packageUrl: URL? {
@@ -169,9 +171,9 @@ class ServerInstaller: Identifiable, ObservableObject {
 }
 
 // MARK: - GBox loopback payload server
-// GBox/NeoSign fetch the signed package from http://127.0.0.1:8881/app.ipa.
-// When a requiredLocalEndpoint is supplied, NWListener must not also be given
-// the same explicit `on:` port. Doing both causes NWError -22 (EINVAL) on iOS.
+// GBox 6.1.3 serves .InstallPackage/app.ipa from its local HTTP server on
+// port 9800. Keep the same loopback route used by the GBox production
+// install.plist: http://127.0.0.1:9800/app.ipa.
 private final class GBoxLoopbackServer {
 	private let listener: NWListener
 	private let queue = DispatchQueue(label: "app.batsign.gbox-loopback", qos: .userInitiated)
@@ -216,8 +218,8 @@ private final class GBoxLoopbackServer {
 		parameters.allowLocalEndpointReuse = true
 		parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(loopback), port: endpointPort)
 
-		// Do not pass `on: endpointPort` here. The port is already fixed by
-		// requiredLocalEndpoint, and specifying it twice returns EINVAL on iOS.
+		// The port is already fixed by requiredLocalEndpoint. Passing the same
+		// port again through NWListener(using:on:) produces EINVAL on iOS.
 		listener = try NWListener(using: parameters)
 
 		listener.newConnectionHandler = { [weak self] connection in
