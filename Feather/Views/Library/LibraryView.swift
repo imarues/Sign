@@ -585,8 +585,8 @@ extension LibraryView {
 				_startUpdateDownload(update)
 			}
 		} else if app.isSigned {
-			WSActionButton(title: "Open") {
-				UIApplication.openApp(with: app.identifier ?? "")
+			WSActionButton(title: "تثبيت") {
+				_selectedInstallAppPresenting = AnyApp(base: app)
 			}
 		} else if _isInstalling(app) {
 			HStack(spacing: 8) {
