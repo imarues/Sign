@@ -11,5 +11,10 @@ FEATHER_DISAMBIGUATOR=${DEVELOPMENT_TEAM}
 
 AD_HOC_CODE_SIGNING_ALLOWED = YES
 
+// GBox/NeoSign-style OTA installation serves the signed IPA from a local
+// loopback listener. Keep the privacy string present so iOS can authorize a
+// listener if the networking stack classifies it as local-network access.
+INFOPLIST_KEY_NSLocalNetworkUsageDescription = BatSign uses a local server on this iPhone to install signed apps.
+
 DEPLOYMENT_LOCATION = YES
 DSTROOT = $(SRCROOT)/_build/
