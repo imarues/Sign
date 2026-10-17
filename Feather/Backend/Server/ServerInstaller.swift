@@ -25,16 +25,7 @@ class ServerInstaller: Identifiable, ObservableObject {
 	@ObservedObject var viewModel: InstallerStatusViewModel
 	private var _server: Application?
 
-	/// Why the local server is not answering, if it is not.
-	///
-	/// The initialiser used to `throw`, and the one place that built one did it
-	/// inside a `try!` in a view's initialiser: a port that was still held by the
-	/// previous install took the whole app down as the sheet opened. Binding now
-	/// fails into this, and the sheet can say what happened instead.
 	private(set) var startupError: Error?
-
-	/// Whether the server came up with TLS. The install URLs are built to match,
-	/// so this is not cosmetic: see `setupApp`, which is where it is set.
 	var usesTLS = false
 
 	init(app: AppInfoPresentable, viewModel: InstallerStatusViewModel) {
@@ -52,12 +43,8 @@ class ServerInstaller: Identifiable, ObservableObject {
 		}
 	}
 
-	/// Whether the local install server came up. The other two install routes
-	/// (`idevice`) does not need it.
 	var isAvailable: Bool { _server != nil }
 
-	/// Stop serving the staged package once install has failed or timed out.
-	/// Idempotent because view teardown and failure recovery can race.
 	func stop() {
 		_shutdownServer()
 		_server = nil
@@ -72,9 +59,6 @@ class ServerInstaller: Identifiable, ObservableObject {
 		do {
 			self._server = try setupApp(port: port)
 		} catch {
-			// A TLS identity that is revoked or unusable is refused by
-			// `setupApp` — recorded here so the install screen can say why
-			// instead of sitting on a server that never came up.
 			self.startupError = error
 			self._server = nil
 		}
@@ -97,7 +81,7 @@ class ServerInstaller: Identifiable, ObservableObject {
 				return Response(status: .ok, version: req.version, headers: [
 					"Content-Type": "image/png",
 				], body: .init(data: displayImageLargeData))
-			case payloadEndpoint.path:
+			case payloadEndpoint.path, gboxPayloadEndpoint.path:
 				guard let packageUrl = packageUrl else {
 					return Response(status: .notFound)
 				}
@@ -113,7 +97,6 @@ class ServerInstaller: Identifiable, ObservableObject {
 					case .failure(let error):
 						self._updateStatus(.broken(error))
 					}
-
 				}
 			case "/install":
 				var headers = HTTPHeaders()
@@ -127,7 +110,6 @@ class ServerInstaller: Identifiable, ObservableObject {
 	
 	private func _shutdownServer() {
 		guard _needsShutdown else { return }
-		
 		_needsShutdown = false
 		_server?.server.shutdown()
 		_server?.shutdown()
