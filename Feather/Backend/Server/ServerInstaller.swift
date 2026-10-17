@@ -18,8 +18,6 @@ import IDeviceSwift
 // MARK: - Class
 class ServerInstaller: Identifiable, ObservableObject {
 	let id = UUID()
-	// NeoSign's GBox backup manifest points its software-package back to the
-	// fixed loopback install service on port 8881.
 	let port = 8881
 	private var _needsShutdown = false
 
@@ -53,9 +51,9 @@ class ServerInstaller: Identifiable, ObservableObject {
 				server.onError = { [weak self] error in
 					self?._updateStatus(.broken(error))
 				}
-				self._gboxServer = server
+				_gboxServer = server
 			} catch {
-				self.startupError = error
+				startupError = error
 			}
 			return
 		}
@@ -67,13 +65,15 @@ class ServerInstaller: Identifiable, ObservableObject {
 			try _server?.server.start()
 			_needsShutdown = _server != nil
 		} catch {
-			self.startupError = error
+			startupError = error
 			_server = nil
 		}
 	}
 
 	var isAvailable: Bool {
-		if getServerMethod() == 0 { return _gboxServer != nil && startupError == nil }
+		if getServerMethod() == 0 {
+			return _gboxServer != nil && startupError == nil
+		}
 		return _server != nil
 	}
 
@@ -92,10 +92,10 @@ class ServerInstaller: Identifiable, ObservableObject {
 
 	private func _setup() {
 		do {
-			self._server = try setupApp(port: port)
+			_server = try setupApp(port: port)
 		} catch {
-			self.startupError = error
-			self._server = nil
+			startupError = error
+			_server = nil
 		}
 	}
 
@@ -105,24 +105,29 @@ class ServerInstaller: Identifiable, ObservableObject {
 			switch req.url.path {
 			case plistEndpoint.path:
 				self._updateStatus(.sendingManifest)
-				return Response(status: .ok, version: req.version, headers: [
-					"Content-Type": "text/xml",
-				], body: .init(data: installManifestData))
+				return Response(
+					status: .ok,
+					version: req.version,
+					headers: ["Content-Type": "text/xml"],
+					body: .init(data: installManifestData)
+				)
 			case displayImageSmallEndpoint.path:
-				return Response(status: .ok, version: req.version, headers: [
-					"Content-Type": "image/png",
-				], body: .init(data: displayImageSmallData))
+				return Response(
+					status: .ok,
+					version: req.version,
+					headers: ["Content-Type": "image/png"],
+					body: .init(data: displayImageSmallData)
+				)
 			case displayImageLargeEndpoint.path:
-				return Response(status: .ok, version: req.version, headers: [
-					"Content-Type": "image/png",
-				], body: .init(data: displayImageLargeData))
+				return Response(
+					status: .ok,
+					version: req.version,
+					headers: ["Content-Type": "image/png"],
+					body: .init(data: displayImageLargeData)
+				)
 			case payloadEndpoint.path, gboxPayloadEndpoint.path:
-				guard let packageUrl = packageUrl else {
-					return Response(status: .notFound)
-				}
-
+				guard let packageUrl else { return Response(status: .notFound) }
 				self._updateStatus(.sendingPayload)
-
 				return req.fileio.streamFile(at: packageUrl.path) { result in
 					switch result {
 					case .success:
@@ -134,7 +139,7 @@ class ServerInstaller: Identifiable, ObservableObject {
 			case "/install":
 				var headers = HTTPHeaders()
 				headers.add(name: .contentType, value: "text/html")
-				return Response(status: .ok, headers: headers, body: .init(string: self.html))
+				return Response(status: .ok, headers: headers, body: .init(string: html))
 			default:
 				return Response(status: .notFound)
 			}
@@ -164,12 +169,9 @@ class ServerInstaller: Identifiable, ObservableObject {
 }
 
 // MARK: - GBox loopback payload server
-//
-// NeoSign carries a GCDWebServer/NWListener local-server path. GBox carries
-// CocoaHTTPServer/GCDAsyncSocket. The old Feather OTA path used Vapor/NIO,
-// which is the component returning EPERM on-device in GBox mode. This minimal
-// Network.framework server is deliberately limited to the one route the GBox
-// manifest needs: http://127.0.0.1:8881/app.ipa.
+// GBox/NeoSign fetch the signed package from http://127.0.0.1:8881/app.ipa.
+// When a requiredLocalEndpoint is supplied, NWListener must not also be given
+// the same explicit `on:` port. Doing both causes NWError -22 (EINVAL) on iOS.
 private final class GBoxLoopbackServer {
 	private let listener: NWListener
 	private let queue = DispatchQueue(label: "app.batsign.gbox-loopback", qos: .userInitiated)
@@ -202,11 +204,21 @@ private final class GBoxLoopbackServer {
 				userInfo: [NSLocalizedDescriptionKey: "Invalid GBox loopback port."]
 			)
 		}
+		guard let loopback = IPv4Address("127.0.0.1") else {
+			throw NSError(
+				domain: "BatSign.GBoxLoopback",
+				code: 3,
+				userInfo: [NSLocalizedDescriptionKey: "Invalid loopback address."]
+			)
+		}
 
 		let parameters = NWParameters.tcp
 		parameters.allowLocalEndpointReuse = true
-		parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: endpointPort)
-		self.listener = try NWListener(using: parameters, on: endpointPort)
+		parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(loopback), port: endpointPort)
+
+		// Do not pass `on: endpointPort` here. The port is already fixed by
+		// requiredLocalEndpoint, and specifying it twice returns EINVAL on iOS.
+		listener = try NWListener(using: parameters)
 
 		listener.newConnectionHandler = { [weak self] connection in
 			self?._accept(connection)
@@ -237,7 +249,6 @@ private final class GBoxLoopbackServer {
 				connection.cancel()
 				return
 			}
-
 			if let error {
 				self.onError?(error)
 				connection.cancel()
@@ -246,22 +257,18 @@ private final class GBoxLoopbackServer {
 
 			var next = buffer
 			if let data { next.append(data) }
-
 			if next.count > 65_536 {
 				self._sendSimple(connection, status: "431 Request Header Fields Too Large")
 				return
 			}
-
 			if next.range(of: Data("\r\n\r\n".utf8)) != nil {
 				self._handleRequest(next, on: connection)
 				return
 			}
-
 			if isComplete {
 				connection.cancel()
 				return
 			}
-
 			self._readRequest(connection, buffer: next)
 		}
 	}
@@ -343,12 +350,10 @@ private final class GBoxLoopbackServer {
 					connection.cancel()
 					return
 				}
-
 				if method == "HEAD" {
 					connection.cancel()
 					return
 				}
-
 				self._streamFile(
 					url: url,
 					start: start,
