@@ -35,7 +35,7 @@ extension ServerInstaller {
 	}
 
 	/// NeoSign 5.2.0 builds the GBox backup manifest filename from:
-	///     Base64("<name>/<bundle-id>/<version>") + ".plist"
+	///     unpaddedBase64("<name>/<bundle-id>/<version>") + ".plist"
 	/// and prefixes it with backup_install_manifest_base_url, whose default is
 	/// https://test.gbox.run/. This is the actual GBox backup path; /manifest.php
 	/// belongs to NeoSign's separate cert_api_base_url and is deliberately not
@@ -43,9 +43,10 @@ extension ServerInstaller {
 	var gboxManifestEndpoint: URL? {
 		let identifier = app.identifier ?? ""
 		let descriptor = "\(app.name)/\(identifier)/\(app.version)"
-		let base64 = Data(descriptor.utf8).base64EncodedString()
+		let base64 = Data(descriptor.utf8)
+			.base64EncodedString()
+			.trimmingCharacters(in: CharacterSet(charactersIn: "="))
 
-		// NeoSign URL-encodes the generated path component before opening it.
 		// Encode Base64 punctuation so '/' or '+' can never be interpreted as
 		// another URL path level.
 		var allowed = CharacterSet.alphanumerics
