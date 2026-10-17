@@ -42,38 +42,17 @@ extension ServerInstaller {
 		return value.isEmpty ? "1.0" : value
 	}
 
-	/// NeoSign's GBox backup manifest expects the signed IPA to be available from
-	/// its fixed loopback service at 127.0.0.1:8881/app.ipa. The ServerInstaller
-	/// port is fixed to 8881 to match that protocol.
+	/// GBox 6.1.3 starts its local HTTPServer on port 9800 and serves the signed
+	/// archive from .InstallPackage/app.ipa. Mirror that protocol exactly.
 	var gboxPayloadEndpoint: URL {
-		URL(string: "http://127.0.0.1:8881/app.ipa")!
+		URL(string: "http://127.0.0.1:9800/app.ipa")!
 	}
 
-	/// NeoSign 5.2.0 builds the GBox backup manifest filename from:
-	///     unpaddedBase64("<name>/<bundle-id>/<version>") + ".plist"
-	/// and prefixes it with backup_install_manifest_base_url, whose default is
-	/// https://test.gbox.run/.
-	///
-	/// Do not interpolate AppInfoPresentable optionals directly here. Swift turns
-	/// an optional String into text such as Optional("1Contact"), which changes
-	/// the Base64 key and makes GBox generate an invalid manifest/title.
+	/// Use GBox's own production install manifest instead of NeoSign's backup
+	/// manifest service. The current GBox binary builds this exact URL after
+	/// starting its local server on port 9800.
 	var gboxManifestEndpoint: URL? {
-		guard let identifier = manifestIdentifier else { return nil }
-		let descriptor = "\(manifestName)/\(identifier)/\(manifestVersion)"
-		let base64 = Data(descriptor.utf8)
-			.base64EncodedString()
-			.trimmingCharacters(in: CharacterSet(charactersIn: "="))
-
-		// Keep the Base64 value as one URL path component. Percent-encoding only
-		// protects punctuation that would otherwise be interpreted as URL syntax;
-		// the server receives the decoded Base64 filename.
-		var allowed = CharacterSet.alphanumerics
-		allowed.insert(charactersIn: "-._~")
-		guard let encoded = base64.addingPercentEncoding(withAllowedCharacters: allowed) else {
-			return nil
-		}
-
-		return URL(string: "https://test.gbox.run/\(encoded).plist")
+		URL(string: "https://i.gbox.run/install.plist")
 	}
 
 	/// Local endpoints are retained as a fallback/debug route.
