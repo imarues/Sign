@@ -39,20 +39,34 @@ extension ServerInstaller {
 
 	private var manifestVersion: String {
 		let value = app.version?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-		return value.isEmpty ? "1.0" : value
+		return value.isEmpty ? "1.0.0" : value
 	}
 
-	/// GBox 6.1.3 starts its local HTTPServer on port 9800 and serves the signed
-	/// archive from .InstallPackage/app.ipa. Mirror that protocol exactly.
+	/// GBox 6.1.3 starts CocoaHTTPServer on port 9800 with .InstallPackage as
+	/// its document root, so the signed archive is reachable as /app.ipa.
 	var gboxPayloadEndpoint: URL {
 		URL(string: "http://127.0.0.1:9800/app.ipa")!
 	}
 
-	/// Use GBox's own production install manifest instead of NeoSign's backup
-	/// manifest service. The current GBox binary builds this exact URL after
-	/// starting its local server on port 9800.
+	/// Match the production GBox 6.1.3 manifest path exactly.
+	///
+	/// For a normal app install GBox does NOT use /install.plist. It builds:
+	///   Base64("<name>/<bundle-id>/<version>")
+	/// replaces '=' padding with the literal URL escape "%3D", then opens:
+	///   https://i.gbox.run/<encoded>.plist
+	///
+	/// The fixed /install.plist path is only a fallback branch when app metadata
+	/// is not supplied. Since BatSign always has the signed app metadata, use the
+	/// same dynamic production path as GBox.
 	var gboxManifestEndpoint: URL? {
-		URL(string: "https://i.gbox.run/install.plist")
+		guard let identifier = manifestIdentifier else {
+			return URL(string: "https://i.gbox.run/install.plist")
+		}
+
+		let descriptor = "\(manifestName)/\(identifier)/\(manifestVersion)"
+		let base64 = Data(descriptor.utf8).base64EncodedString()
+		let gboxEncoded = base64.replacingOccurrences(of: "=", with: "%3D")
+		return URL(string: "https://i.gbox.run/\(gboxEncoded).plist")
 	}
 
 	/// Local endpoints are retained as a fallback/debug route.
