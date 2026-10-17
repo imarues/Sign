@@ -97,6 +97,17 @@ class ServerInstaller: Identifiable, ObservableObject {
 					switch result {
 					case .success:
 						self._updateStatus(.installing)
+
+						// The GBox manifest always points to the fixed loopback port 8881.
+						// Once installd has received the complete IPA there is nothing left
+						// for this local HTTP server to serve. Keeping it bound for the old
+						// 11-minute hand-off lifetime makes the next Clone/Re-sign attempt
+						// fail to start its own listener on the same port. Release the port
+						// shortly after the file transfer finishes; the archive itself stays
+						// retained by AutoSignManager until the install hand-off ends.
+						DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+							self?.stop()
+						}
 					case .failure(let error):
 						self._updateStatus(.broken(error))
 					}
