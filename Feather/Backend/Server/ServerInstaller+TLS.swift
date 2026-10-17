@@ -15,22 +15,16 @@ import SystemConfiguration.CaptiveNetwork
 
 // MARK: - Class extension: TLS/Setup
 extension ServerInstaller {
-	/// Coordinates readers with the three-file certificate replacement so a
-	/// server can never load a new key with an old certificate (or vice
-	/// versa). Ported with the certificate fixes.
+	/// Kept for compatibility with the existing certificate management code.
+	/// GBox OTA installs no longer require this identity for the local payload.
 	private static let tlsIdentityLock = NSLock()
 
-	/// Runs an operation while the TLS identity on disk cannot be replaced.
 	static func withTLSIdentityLock<T>(_ operation: () throws -> T) rethrows -> T {
 		tlsIdentityLock.lock()
 		defer { tlsIdentityLock.unlock() }
 		return try operation()
 	}
 
-	/// Parses the complete PEM chain and private key and asks NIOSSL to build
-	/// a server context. Building the context verifies that the staged
-	/// identity is usable before it is allowed to replace the currently
-	/// working files.
 	static func validateTLSIdentity(
 		certificateURL: URL,
 		privateKeyURL: URL
@@ -57,7 +51,6 @@ extension ServerInstaller {
 		)
 	}
 
-	// MARK: Setup
 	static let env: Environment = {
 		var env = (try? Environment.detect()) ?? .development
 		try? LoggingSystem.bootstrap(from: &env)
@@ -68,13 +61,11 @@ extension ServerInstaller {
 		let app = Application(Self.env)
 		app.threadPool = .init(numberOfThreads: 1)
 
-		// Preserve the existing local installation behavior: use TLS when a
-		// certificate is configured and usable; otherwise serve via the local
-		// listener as before. The OTA manifest's URLs must match this choice.
-		if getServerMethod() != 1, Self.hasCertificateMaterial(), let tls = try tls() {
-			app.http.server.configuration.tlsConfiguration = tls
-			usesTLS = true
-		}
+		// GBox/NeoSign's reliable OTA path serves the IPA from a plain HTTP
+		// loopback listener while the manifest itself is HTTPS on GBox. Do not
+		// attach the old Backloop/local TLS identity here: installd will fetch
+		// http://127.0.0.1:<port>/app.ipa directly from this process.
+		usesTLS = false
 
 		app.http.server.configuration.hostname = sni()
 		app.http.server.configuration.tcpNoDelay = true
@@ -85,27 +76,22 @@ extension ServerInstaller {
 		return app
 	}
 
-
 	// MARK: Files/IP
 	func sni() -> String {
 		let localhost = "127.0.0.1"
 		
+		// Semi-local/webview mode may still use the device address when requested.
 		if getServerMethod() == 1 {
 			return !self.getIPFix()
 				? (Self.getLocalAddress() ?? localhost)
 				: localhost
 		}
-		
-		// An empty file is not a host name. Both of these used to be returned as
-		// they came, and an empty host is a URL that cannot be built.
-		if let name = readCommonName(), !name.isEmpty {
-			return name
-		}
-		
+
+		// GBox manifest mode must always point back to this phone, independent of
+		// any downloaded SSL certificate/common-name file.
 		return localhost
 	}
 
-	/// Whether a server certificate and its name are there to be used.
 	static func hasCertificateMaterial() -> Bool {
 		guard
 			Self.getUrl("server", ext: "crt") != nil,
@@ -115,7 +101,6 @@ extension ServerInstaller {
 		else {
 			return false
 		}
-		
 		return !contents.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
 	}
 
@@ -133,9 +118,6 @@ extension ServerInstaller {
 	}
 	
 	func tls() throws -> TLSConfiguration? {
-		// A positively blocked identity is never presented again. Returning nil
-		// makes setup fail closed with `unusableTLSIdentity`; callers may use the
-		// pairing/tunnel installer instead, but this server never downgrades to HTTP.
 		guard !FR.isActiveSSLCertificateBlocked() else { return nil }
 
 		return try Self.withTLSIdentityLock {
@@ -175,7 +157,6 @@ extension ServerInstaller {
 	static func getUrl(_ name: String, ext: String) -> URL? {
 		let fileManager = FileManager.default
 
-		// The directory the certificate fix installs into.
 		let serverURL = URL.documentsDirectory.appendingPathComponent("App").appendingPathComponent("Server").appendingPathComponent("\(name).\(ext)")
 		if fileManager.fileExists(atPath: serverURL.path) {
 			return serverURL
