@@ -12,14 +12,11 @@ struct ServerView: View {
 	@AppStorage("Feather.ipFix") private var _ipFix: Bool = false
 	@AppStorage("Feather.serverMethod") private var _serverMethod: Int = 0
 	@AppStorage("Feather.batchGroupSize") private var _batchGroupSize: Int = 5
-	@State private var _isUpdatingCertificates = false
 
 	private let _serverMethods: [String] = [
-		.localized("Fully Local"),
+		"GBox",
 		.localized("Semi Local")
 	]
-
-	private let _serverPackUrl = "https://backloop.dev/pack.json"
 
 	var body: some View {
 		Group {
@@ -45,34 +42,7 @@ struct ServerView: View {
 				}
 				.disabled(_serverMethod != 0)
 			} footer: {
-				Text("Fully Local installs can share one confirmation across several apps. This sets how many apps go into each prompt. 1 gives a separate prompt per app.")
-			}
-
-			Section {
-				Button(.localized("Update SSL Certificates"), systemImage: "arrow.down.doc") {
-					guard !_isUpdatingCertificates else { return }
-					_isUpdatingCertificates = true
-
-					FR.downloadSSLCertificates(from: _serverPackUrl) { result in
-						DispatchQueue.main.async {
-							_isUpdatingCertificates = false
-
-							switch result {
-							case .success:
-								UIAlertController.showAlertWithOk(
-									title: .localized("SSL Certificates"),
-									message: .localized("Certificates updated successfully.")
-								)
-							case .failure(let error):
-								UIAlertController.showAlertWithOk(
-									title: .localized("SSL Certificates"),
-									message: "Certificate update failed.\n\n\(error.localizedDescription)"
-								)
-							}
-						}
-					}
-				}
-				.disabled(_isUpdatingCertificates)
+				Text("GBox installs can share one confirmation across several apps. This sets how many apps go into each prompt. 1 gives a separate prompt per app.")
 			}
 		}
 		.onChange(of: _serverMethod) { _ in
