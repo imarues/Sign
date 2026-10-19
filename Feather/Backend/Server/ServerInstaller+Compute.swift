@@ -48,25 +48,23 @@ extension ServerInstaller {
 		URL(string: "http://127.0.0.1:9800/app.ipa")!
 	}
 
-	/// Match the production GBox 6.1.3 manifest path exactly.
-	///
-	/// For a normal app install GBox does NOT use /install.plist. It builds:
-	///   Base64("<name>/<bundle-id>/<version>")
-	/// replaces '=' padding with the literal URL escape "%3D", then opens:
-	///   https://i.gbox.run/<encoded>.plist
-	///
-	/// The fixed /install.plist path is only a fallback branch when app metadata
-	/// is not supplied. Since BatSign always has the signed app metadata, use the
-	/// same dynamic production path as GBox.
+	/// Build the same production GBox manifest key, but hand iOS a manifest URL
+	/// on our own Pages domain. The Pages Function proxies the GBox plist bytes
+	/// server-side without redirecting the device, so the visible install origin
+	/// is ikiraplus.pages.dev while the signing and payload flow stay unchanged.
 	var gboxManifestEndpoint: URL? {
-		guard let identifier = manifestIdentifier else {
-			return URL(string: "https://i.gbox.run/install.plist")
+		let manifestFile: String
+
+		if let identifier = manifestIdentifier {
+			let descriptor = "\(manifestName)/\(identifier)/\(manifestVersion)"
+			let base64 = Data(descriptor.utf8).base64EncodedString()
+			let gboxEncoded = base64.replacingOccurrences(of: "=", with: "%3D")
+			manifestFile = "\(gboxEncoded).plist"
+		} else {
+			manifestFile = "install.plist"
 		}
 
-		let descriptor = "\(manifestName)/\(identifier)/\(manifestVersion)"
-		let base64 = Data(descriptor.utf8).base64EncodedString()
-		let gboxEncoded = base64.replacingOccurrences(of: "=", with: "%3D")
-		return URL(string: "https://i.gbox.run/\(gboxEncoded).plist")
+		return URL(string: "https://ikiraplus.pages.dev/install/\(manifestFile)")
 	}
 
 	/// Local endpoints are retained as a fallback/debug route.
