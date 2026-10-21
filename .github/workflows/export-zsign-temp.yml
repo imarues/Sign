@@ -1,0 +1,21 @@
+name: Export Zsign Snapshot
+
+on:
+  push:
+    branches: [zsign-export-temp]
+  workflow_dispatch:
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Package Zsign
+        run: zip -qry Zsign-snapshot.zip Zsign
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Zsign-snapshot
+          path: Zsign-snapshot.zip
+          if-no-files-found: error
