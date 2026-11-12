@@ -17,6 +17,10 @@ import IDeviceSwift
 
 // MARK: - Class
 class ServerInstaller: Identifiable, ObservableObject {
+	// There must be only one listener on the fixed OTA port (9800) per app.
+	// Reuse it across install sheets rather than attempting a second bind.
+	private static let loopbackLock = NSLock()
+	private static var sharedLoopbackServer: GBoxLoopbackServer?
 	let id = UUID()
 	// GBox 6.1.3 starts its local HTTP server on 9800 before opening
 	// https://i.gbox.run/install.plist. Keep the same fixed port.
@@ -24,7 +28,28 @@ class ServerInstaller: Identifiable, ObservableObject {
 	private var _needsShutdown = false
 
 	var packageUrl: URL? {
-		didSet { _gboxServer?.packageURL = packageUrl }
+		didSet {
+			guard getServerMethod() == 0, let packageUrl, let server = _gboxServer else { return }
+			if server.claim(packageURL: packageUrl, owner: id,
+			                onServing: { [weak self] in self?._updateStatus(.sendingPayload) },
+			                onFullTransfer: { [weak self] in
+					self?._updateStatus(.installing)
+					DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+						self?.stop()
+					}
+				},
+			                onError: { [weak self] error in self?._updateStatus(.broken(error)) }) {
+				startupError = nil
+			} else {
+				let error = server.listenerFailure ?? NSError(
+					domain: "BatSign.GBoxLoopback", code: 48,
+					userInfo: [NSLocalizedDescriptionKey:
+						"Another install is using the local server. Finish or cancel that install, then try again."]
+				)
+				startupError = error
+				_updateStatus(.broken(error))
+			}
+		}
 	}
 	var app: AppInfoPresentable
 	@ObservedObject var viewModel: InstallerStatusViewModel
@@ -40,20 +65,18 @@ class ServerInstaller: Identifiable, ObservableObject {
 
 		if getServerMethod() == 0 {
 			do {
-				let server = try GBoxLoopbackServer(port: UInt16(port))
-				server.onServing = { [weak self] in
-					self?._updateStatus(.sendingPayload)
+				Self.loopbackLock.lock()
+				defer { Self.loopbackLock.unlock() }
+				if let server = Self.sharedLoopbackServer, server.listenerFailure == nil {
+					_gboxServer = server
+				} else {
+					// A failed listener is replaced on the next attempt so that
+					// another app releasing port 9800 doesn't require a relaunch.
+					Self.sharedLoopbackServer?.stop()
+					let server = try GBoxLoopbackServer(port: UInt16(port))
+					Self.sharedLoopbackServer = server
+					_gboxServer = server
 				}
-				server.onFullTransfer = { [weak self] in
-					self?._updateStatus(.installing)
-					DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-						self?.stop()
-					}
-				}
-				server.onError = { [weak self] error in
-					self?._updateStatus(.broken(error))
-				}
-				_gboxServer = server
 			} catch {
 				startupError = error
 			}
@@ -80,7 +103,7 @@ class ServerInstaller: Identifiable, ObservableObject {
 	}
 
 	func stop() {
-		_gboxServer?.stop()
+		_gboxServer?.release(owner: id)
 		_gboxServer = nil
 		_shutdownServer()
 		_server = nil
@@ -88,7 +111,7 @@ class ServerInstaller: Identifiable, ObservableObject {
 	}
 
 	deinit {
-		_gboxServer?.stop()
+		_gboxServer?.release(owner: id)
 		_shutdownServer()
 	}
 
@@ -179,19 +202,49 @@ private final class GBoxLoopbackServer {
 	private let queue = DispatchQueue(label: "app.batsign.gbox-loopback", qos: .userInitiated)
 	private let packageLock = NSLock()
 	private var _packageURL: URL?
+	private var claimedBy: UUID?
+	private var _listenerFailure: Error?
 	private var stopped = false
 
 	var packageURL: URL? {
-		get {
-			packageLock.lock()
-			defer { packageLock.unlock() }
-			return _packageURL
-		}
-		set {
-			packageLock.lock()
-			_packageURL = newValue
-			packageLock.unlock()
-		}
+		packageLock.lock()
+		defer { packageLock.unlock() }
+		return _packageURL
+	}
+
+	var listenerFailure: Error? {
+		packageLock.lock()
+		defer { packageLock.unlock() }
+		return _listenerFailure
+	}
+
+	/// Only one package can be exposed as /app.ipa at a time; a second
+	/// install must not silently replace an IPA that installd is fetching.
+	func claim(packageURL: URL, owner: UUID,
+	           onServing: @escaping () -> Void,
+	           onFullTransfer: @escaping () -> Void,
+	           onError: @escaping (Error) -> Void) -> Bool {
+		packageLock.lock()
+		defer { packageLock.unlock() }
+		guard !stopped, _listenerFailure == nil,
+		      claimedBy == nil || claimedBy == owner else { return false }
+		claimedBy = owner
+		_packageURL = packageURL
+		self.onServing = onServing
+		self.onFullTransfer = onFullTransfer
+		self.onError = onError
+		return true
+	}
+
+	func release(owner: UUID) {
+		packageLock.lock()
+		defer { packageLock.unlock() }
+		guard claimedBy == owner else { return }
+		claimedBy = nil
+		_packageURL = nil
+		onServing = nil
+		onFullTransfer = nil
+		onError = nil
 	}
 
 	var onServing: (() -> Void)?
@@ -228,7 +281,11 @@ private final class GBoxLoopbackServer {
 		listener.stateUpdateHandler = { [weak self] state in
 			guard let self else { return }
 			if case .failed(let error) = state {
-				self.onError?(error)
+				self.packageLock.lock()
+				self._listenerFailure = error
+				let handler = self.onError
+				self.packageLock.unlock()
+				handler?(error)
 			}
 		}
 		listener.start(queue: queue)
