@@ -172,11 +172,32 @@ struct SourceAppsView: View {
 	// MARK: Body
 	var body: some View {
 		Group {
-			if _sourceContexts == nil, !viewModel.isFinished {
+			if _sourceContexts == nil, object.contains(where: { viewModel.isFetching($0) }) {
 				ProgressView()
 					.frame(maxWidth: .infinity, maxHeight: .infinity)
 			} else if _items.isEmpty {
-				if _isFiltering && !_trimmedSearch.isEmpty {
+				if let first = object.first, let reason = viewModel.failure(for: first),
+				   _sourceContexts == nil {
+					VStack(spacing: 16) {
+						Image(systemName: "exclamationmark.arrow.triangle.2.circlepath")
+							.font(.system(size: 36))
+						Text("Couldn't load this source").font(.headline)
+						Text(reason)
+							.font(.subheadline)
+							.foregroundStyle(.secondary)
+							.multilineTextAlignment(.center)
+						Text(first.sourceURL?.absoluteString ?? "")
+							.font(.caption)
+							.foregroundStyle(.tertiary)
+							.lineLimit(3)
+						Button("Retry Source") {
+							Task { await viewModel.fetchSources(object, refresh: true) }
+						}
+						.buttonStyle(.borderedProminent)
+					}
+					.padding(24)
+					.frame(maxWidth: .infinity, maxHeight: .infinity)
+				} else if _isFiltering && !_trimmedSearch.isEmpty {
 					ProgressView()
 						.frame(maxWidth: .infinity, maxHeight: .infinity)
 				} else {
@@ -284,6 +305,9 @@ struct SourceAppsView: View {
 		.onAppear {
 			_sortOption = SortOption(rawValue: _sortOptionRawValue) ?? .default
 			_load()
+			if object.contains(where: { viewModel.sources[$0] == nil && !viewModel.isFetching($0) }) {
+				Task { await viewModel.fetchSources(object, refresh: true) }
+			}
 		}
 		.onChange(of: viewModel.isFinished) { _ in
 			_load()
