@@ -12,7 +12,8 @@ import NimbleViews
 
 enum TabEnum: String, CaseIterable, Hashable {
 	case today
-	case sources
+	case sources // Legacy saved default-tab preference; Sources now opens from Today.
+	case games
 	case apps
 	case library
 	case updates
@@ -22,7 +23,8 @@ enum TabEnum: String, CaseIterable, Hashable {
 		switch self {
 		case .today: 	return .localized("Today")
 		case .sources: 	return .localized("Sources")
-		case .apps: 	return .localized("Apps")
+		case .games: 	return "الألعاب"
+		case .apps: 	return "التطبيقات"
 		case .library: 	return .localized("Library")
 		case .updates: 	return .localized("Updates")
 		case .search: 	return .localized("Search")
@@ -33,6 +35,7 @@ enum TabEnum: String, CaseIterable, Hashable {
 		switch self {
 		case .today: 	return "doc.text.image"
 		case .sources: 	return "cart.fill"
+		case .games: 	return "gamecontroller.fill"
 		case .apps: 	return "square.grid.2x2.fill"
 		case .library: 	return "square.stack.3d.up.fill"
 		case .updates: 	return "arrow.triangle.2.circlepath"
@@ -45,7 +48,8 @@ enum TabEnum: String, CaseIterable, Hashable {
 		switch tab {
 		case .today: DiscoverView()
 		case .sources: BSSourcesView()
-		case .apps: BSAppsView()
+		case .games: BSAppsView(title: "الألعاب", scope: .games)
+		case .apps: BSAppsView(title: "التطبيقات", scope: .applications)
 		case .library: LibraryView()
 		case .updates: UpdatesView()
 		case .search: BSAppsView(title: "Search")
@@ -59,7 +63,7 @@ enum TabEnum: String, CaseIterable, Hashable {
 	static var defaultTabs: [TabEnum] {
 		return [
 			.today,
-			.sources,
+			.games,
 			.apps,
 			.library
 		]
