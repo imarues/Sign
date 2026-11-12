@@ -12,6 +12,8 @@ import AltSourceKit
 import NimbleViews
 
 struct BSSourcesView: View {
+	var presentedFromToday: Bool = false
+	@Environment(\.dismiss) private var dismiss
 	@StateObject private var _viewModel = SourcesViewModel.shared
 
 	@FetchRequest(
@@ -114,6 +116,11 @@ struct BSSourcesView: View {
 				.navigationTitle("Sources")
 				.navigationBarTitleDisplayMode(.large)
 				.toolbar {
+					if presentedFromToday {
+						ToolbarItem(placement: .topBarLeading) {
+							Button("إغلاق") { dismiss() }
+						}
+					}
 					ToolbarItem(placement: .topBarTrailing) {
 						BSCornerButton(glyph: .plus, label: "Add Source") {
 							_isAddingPresenting = true
