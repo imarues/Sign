@@ -95,44 +95,57 @@ final class SourcesViewModel: ObservableObject {
 	@Published private(set) var revision = 0
 	@Published var sources: [AltSource: ASRepository] = [:]
 
-	private var _fetchTask: Task<Void, Never>?
+	/// Different tabs and newly added sources may request their feeds together.
+	/// Deduplicate the actual network request by URL, not by a single global
+	/// fetch that delays every new source behind one slow catalogue.
+	private var _networkTasks: [URL: Task<ASRepository?, Never>] = [:]
+	private var _activeFetchCalls = 0
 
-	/// Fetch the repositories behind `sources`.
-	///
-	/// Cold launch first restores the most recent successful copy from disk so
-	/// the three storefront tabs can draw immediately. The real source is then
-	/// refreshed in the background and atomically replaces that copy.
+	private func _networkTask(for url: URL) -> Task<ASRepository?, Never> {
+		if let task = _networkTasks[url] { return task }
+		let task = Task.detached(priority: .userInitiated) {
+			await BSRepositoryDiskCache.fetch(from: url, forceReload: true)
+		}
+		_networkTasks[url] = task
+		return task
+	}
+
+	private func _apply(_ repository: ASRepository, to source: AltSource) {
+		sources[source] = repository
+		revision &+= 1
+		// A source is visible immediately after saving its URL. Replace the
+		// temporary hostname and icon as soon as its first fetch succeeds.
+		if let name = repository.name, !name.isEmpty, source.name != name {
+			source.name = name
+		}
+		if let icon = repository.currentIconURL, source.iconURL != icon {
+			source.iconURL = icon
+		}
+		if Storage.shared.context.hasChanges {
+			try? Storage.shared.context.save()
+		}
+	}
+
+	/// Restore previously cached feeds immediately, then update each source
+	/// independently as its own network request completes. A slow or broken
+	/// second feed must not block the primary one (or vice versa).
 	func fetchSources(
 		_ requestedSources: some Collection<AltSource>,
 		refresh: Bool = false,
 		batchSize: Int = 4
 	) async {
 		let requested = Array(requestedSources)
+		let targets = requested.filter { refresh || sources[$0] == nil }
+		guard !targets.isEmpty else { return }
 
-		// All storefront tabs share this model. Previously a second tab simply
-		// returned when another tab happened to own the fetch, which left that
-		// caller with a partial/empty catalogue. Wait for the shared fetch instead.
-		if !isFinished {
-			await _fetchTask?.value
-			if !refresh, requested.allSatisfy({ self.sources[$0] != nil }) {
-				return
-			}
-		}
-
-		if !refresh, requested.allSatisfy({ self.sources[$0] != nil }) {
-			return
-		}
-
+		_activeFetchCalls += 1
 		isFinished = false
-		let task = Task { @MainActor in
-			defer {
-				isFinished = true
-				_fetchTask = nil
-			}
-			await _performFetch(requested, refresh: refresh, batchSize: max(1, batchSize))
+		defer {
+			_activeFetchCalls -= 1
+			isFinished = _activeFetchCalls == 0
 		}
-		_fetchTask = task
-		await task.value
+
+		await _performFetch(targets, refresh: refresh, batchSize: max(1, batchSize))
 	}
 
 	private func _performFetch(
@@ -145,72 +158,44 @@ final class SourcesViewModel: ObservableObject {
 			return (source, url)
 		}
 
-		// Never blank a catalogue that is already on screen. On a normal cold
-		// launch restore missing repositories from disk first; pull-to-refresh
-		// deliberately keeps the current rows visible while the new JSON arrives.
 		if !refresh {
-			let missingURLs = sourcesArray.compactMap { pair in
-				self.sources[pair.source] == nil ? pair.url : nil
-			}
-
-			let cached = await withTaskGroup(
-				of: (URL, ASRepository?).self,
-				returning: [URL: ASRepository].self
-			) { group in
-				for url in missingURLs {
-					group.addTask {
-						(url, BSRepositoryDiskCache.load(from: url))
+			// Use the disk copy without waiting for *all* cache reads.
+			await withTaskGroup(of: (URL, ASRepository?).self) { group in
+				for (_, url) in sourcesArray {
+					group.addTask { (url, BSRepositoryDiskCache.load(from: url)) }
+				}
+				for await (url, repository) in group {
+					guard let repository else { continue }
+					for pair in sourcesArray where pair.url == url {
+						if self.sources[pair.source] == nil {
+							self._apply(repository, to: pair.source)
+						}
 					}
 				}
-
-				var result: [URL: ASRepository] = [:]
-				for await (url, repository) in group {
-					if let repository { result[url] = repository }
-				}
-				return result
-			}
-
-			for (source, url) in sourcesArray {
-				guard self.sources[source] == nil, let repository = cached[url] else { continue }
-				self.sources[source] = repository
-				revision &+= 1
 			}
 		}
 
-		// Always refresh the requested repositories after restoring the cache.
-		// Work is concurrent within each small batch so one slow source cannot
-		// serially hold every other source behind it.
-		for startIndex in stride(from: 0, to: sourcesArray.count, by: batchSize) {
-			let endIndex = min(startIndex + batchSize, sourcesArray.count)
-			let batch = Array(sourcesArray[startIndex..<endIndex])
+		// Request up to batchSize feeds at once, and publish *each* result as
+		// soon as it comes back. Previously we gathered the entire batch into
+		// a dictionary before showing any of its sources.
+		for index in stride(from: 0, to: sourcesArray.count, by: batchSize) {
+			let endIndex = min(index + batchSize, sourcesArray.count)
+			let batch = Array(sourcesArray[index..<endIndex])
+			let tasks = batch.map { (source: $0.source, url: $0.url, task: _networkTask(for: $0.url)) }
 
-			let fetched = await withTaskGroup(
-				of: (URL, ASRepository?).self,
-				returning: [URL: ASRepository].self
-			) { group in
-				for (_, url) in batch {
-					group.addTask {
-						let repository = await BSRepositoryDiskCache.fetch(
-							from: url,
-							forceReload: true
-						)
-						return (url, repository)
-					}
+			await withTaskGroup(of: (URL, ASRepository?).self) { group in
+				for item in tasks {
+					group.addTask { (item.url, await item.task.value) }
 				}
-
-				var result: [URL: ASRepository] = [:]
 				for await (url, repository) in group {
-					if let repository { result[url] = repository }
+					if let repository {
+						for pair in batch where pair.url == url {
+							self._apply(repository, to: pair.source)
+						}
+					}
+					// A failed refresh keeps its previously cached catalogue.
+					_networkTasks[url] = nil
 				}
-				return result
-			}
-
-			for (source, url) in batch {
-				// Network/parsing failure intentionally leaves the last good cache
-				// on screen instead of turning a source into an empty catalogue.
-				guard let repository = fetched[url] else { continue }
-				self.sources[source] = repository
-				revision &+= 1
 			}
 		}
 	}
