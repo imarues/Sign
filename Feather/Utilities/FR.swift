@@ -194,36 +194,51 @@ import IDeviceSwift
 		silent: Bool = false,
 		competion: @escaping () -> Void
 	) {
-		guard let url = URL(string: urlString) else { return }
-		
-		NBFetchService().fetch<ASRepository>(from: url) { (result: Result<ASRepository, Error>) in
-			switch result {
-			case .success(let data):
-				let id = data.id ?? url.absoluteString
-				
-				// The fetch reports back on a URLSession queue and the store's
-				// context is main-queue only, so the existence check and the insert
-				// both happen on main. `ASRepository` is a decoded struct, so it is
-				// safe to carry across the hop on its own.
-				DispatchQueue.main.async {
-					if !Storage.shared.sourceExists(id) {
-						Storage.shared.addSource(url, repository: data, id: id) { _ in
-							competion()
-						}
-					} else if !silent {
-						UIAlertController.showAlertWithOk(title: .localized("Error"), message: .localized("Repository already added."))
-					}
-				}
-			case .failure(let error):
+		let input = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
+		guard let url = URL(string: input),
+		      ["https", "http"].contains(url.scheme?.lowercased() ?? ""),
+		      url.host != nil else {
+			if !silent {
+				UIAlertController.showAlertWithOk(
+					title: .localized("Error"),
+					message: "Enter a valid HTTP or HTTPS source URL."
+				)
+			}
+			return
+		}
+
+		// Save the URL first. Waiting for a giant JSON feed to download and
+		// decode before adding its row was making the second source appear
+		// missing; the shared SourcesViewModel fetches and caches it afterward.
+		DispatchQueue.main.async {
+			if Storage.shared.sourceExists(url: url) {
 				if !silent {
-					DispatchQueue.main.async {
-						UIAlertController.showAlertWithOk(title: .localized("Error"), message: error.localizedDescription)
-					}
+					UIAlertController.showAlertWithOk(
+						title: .localized("Error"),
+						message: .localized("Repository already added.")
+					)
 				}
+				return
+			}
+			Storage.shared.addSource(
+				url,
+				name: url.host ?? "Source",
+				identifier: url.absoluteString
+			) { error in
+				if let error {
+					if !silent {
+						UIAlertController.showAlertWithOk(
+							title: .localized("Error"),
+							message: error.localizedDescription
+						)
+					}
+					return
+				}
+				competion()
 			}
 		}
 	}
-	
+
 	static func exportCertificateAndOpenUrl(using template: String) {
 		// Helper that performs the export for a given certificate
 		func performExport(for certificate: CertificatePair) {
