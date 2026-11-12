@@ -95,6 +95,49 @@ class ServerInstaller: Identifiable, ObservableObject {
 		}
 	}
 
+
+	/// Wait for the previous local IPA to finish streaming instead of
+	/// throwing error 48 while the prior install prompt is still pending.
+	/// The fixed /app.ipa endpoint cannot safely serve two different packages
+	/// simultaneously, so each caller must acquire ownership before opening iOS.
+	var isWaitingForAnotherInstall: Bool {
+		_gboxServer?.isClaimed(byOtherThan: id) ?? false
+	}
+
+	@MainActor
+	func waitForPackage(_ url: URL, timeout: TimeInterval = 150) async throws {
+		guard getServerMethod() == 0 else {
+			packageUrl = url
+			return
+		}
+		guard let server = _gboxServer else {
+			throw startupError ?? NSError(
+				domain: "BatSign.Installation", code: 50,
+				userInfo: [NSLocalizedDescriptionKey: "The local install server is unavailable."]
+			)
+		}
+
+		let deadline = Date().addingTimeInterval(timeout)
+		while true {
+			try Task.checkCancellation()
+			if let error = server.listenerFailure { throw error }
+			if !server.isClaimed(byOtherThan: id) {
+				// Assigning the package activates the same locked claim as existing
+				// single-install callers. Re-check after assignment for races.
+				packageUrl = url
+				if startupError == nil { return }
+			}
+			if Date() >= deadline {
+				throw NSError(
+					domain: "BatSign.Installation", code: 48,
+					userInfo: [NSLocalizedDescriptionKey:
+						"A previous install is still waiting for iOS. Finish or cancel its installation prompt before trying again."]
+				)
+			}
+			try await Task.sleep(nanoseconds: 350_000_000)
+		}
+	}
+
 	var isAvailable: Bool {
 		if getServerMethod() == 0 {
 			return _gboxServer != nil && startupError == nil
@@ -245,6 +288,12 @@ private final class GBoxLoopbackServer {
 		onServing = nil
 		onFullTransfer = nil
 		onError = nil
+	}
+
+	func isClaimed(byOtherThan owner: UUID) -> Bool {
+		packageLock.lock()
+		defer { packageLock.unlock() }
+		return claimedBy != nil && claimedBy != owner
 	}
 
 	var onServing: (() -> Void)?
