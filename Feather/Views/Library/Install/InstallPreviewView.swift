@@ -19,6 +19,8 @@ struct InstallPreviewView: View {
 	@AppStorage("Feather.serverMethod") private var _serverMethod: Int = 0
 	@State private var _isWebviewPresenting = false
 	@State private var progressTask: Task<Void, Never>?
+	@State private var installTask: Task<Void, Never>?
+	@State private var waitingForLocalServer = false
 	/// The packaging pass for this sheet, kept so its working copy can be thrown
 	/// away once the install has read it.
 	@State private var archive: ArchiveHandler?
@@ -124,13 +126,27 @@ struct InstallPreviewView: View {
 		.onDisappear {
 			progressTask?.cancel()
 			progressTask = nil
+			if waitingForLocalServer {
+				// A dismissed sheet must not open an install URL much later after
+				// finally acquiring the listener.
+				installTask?.cancel()
+				installer.stop()
+				archive?.clean()
+			}
+			if case .broken = viewModel.status {
+				installer.stop()
+				archive?.clean()
+			}
 			BSJobKeepAlive.shared.end(BSJobKeepAlive.Reason.manualInstall)
 		}
 	}
 	
 	@ViewBuilder
 	private func _status() -> some View {
-		Label(viewModel.statusLabel, systemImage: viewModel.statusImage)
+		Label(
+			waitingForLocalServer ? "Waiting for previous install…" : viewModel.statusLabel,
+			systemImage: waitingForLocalServer ? "clock.arrow.circlepath" : viewModel.statusImage
+		)
 			.padding()
 			.labelStyle(.titleAndIcon)
 			.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
@@ -175,7 +191,7 @@ struct InstallPreviewView: View {
 			return
 		}
 				
-		Task.detached(priority: .userInitiated) {
+		installTask = Task.detached(priority: .userInitiated) {
 			do {
 				let handler = await ArchiveHandler(app: app, viewModel: viewModel)
 				await MainActor.run { archive = handler }
@@ -186,15 +202,12 @@ struct InstallPreviewView: View {
 				if await !isSharing {
 					if await _installationMethod == 0 {
 						await MainActor.run {
-							installer.packageUrl = packageUrl
-							if let error = installer.startupError {
-								// Do not open the OTA URL when another install owns
-								// the fixed loopback endpoint.
-								archive?.clean()
-								viewModel.status = .broken(error)
-							} else {
-								viewModel.status = .ready
-							}
+							waitingForLocalServer = installer.isWaitingForAnotherInstall
+						}
+						try await installer.waitForPackage(packageUrl)
+						await MainActor.run {
+							waitingForLocalServer = false
+							viewModel.status = .ready
 						}
 						
 						if case .installing = await viewModel.status,
@@ -238,6 +251,11 @@ struct InstallPreviewView: View {
 				}
 			} catch {
 				await progressTask?.cancel()
+				await MainActor.run {
+					waitingForLocalServer = false
+					installer.stop()
+				}
+				if error is CancellationError { return }
 
 				// A failed install is also an install that will not stream the
 				// package, so the working copy it built goes now.
