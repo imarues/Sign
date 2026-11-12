@@ -26,18 +26,24 @@ extension Storage {
 		deferSave: Bool = false,
 		completion: @escaping (Error?) -> Void
 	) {
-		if sourceExists(identifier) {
+		// A repository's JSON id is not globally unique. Two independent
+		// catalogue URLs can advertise the same id; only the URL determines
+		// whether the user already added this particular source.
+		if sourceExists(url: url) {
 			completion(nil)
-			Logger.misc.debug("ignoring \(identifier)")
+			Logger.misc.debug("source URL already saved: \(url.absoluteString)")
 			return
 		}
+		let uniqueIdentifier = sourceExists(identifier)
+			? url.absoluteString
+			: identifier
 		
 		let generator = UIImpactFeedbackGenerator(style: .light)
 		
 		let new = AltSource(context: context)
 		new.name = name
 		new.date = Date()
-		new.identifier = identifier
+		new.identifier = uniqueIdentifier
 		new.sourceURL = url
 		new.iconURL = iconURL
 		
@@ -81,8 +87,11 @@ extension Storage {
 		var seenIdentifiers = Set<String>()
 		
 		for (url, repo) in repos {
-			let identifier = repo.id ?? url.absoluteString
-			guard seenIdentifiers.insert(identifier).inserted, !sourceExists(identifier) else { continue }
+			guard !sourceExists(url: url) else { continue }
+			let requestedID = repo.id ?? url.absoluteString
+			let identifier = (seenIdentifiers.contains(requestedID) || sourceExists(requestedID))
+				? url.absoluteString : requestedID
+			guard seenIdentifiers.insert(identifier).inserted else { continue }
 			let source = AltSource(context: context)
 			source.name = repo.name
 			source.date = Date()
@@ -104,6 +113,17 @@ extension Storage {
 	func deleteSource(for source: AltSource) {
 		context.delete(source)
 		saveContext()
+	}
+
+	func sourceExists(url: URL) -> Bool {
+		let request: NSFetchRequest<AltSource> = AltSource.fetchRequest()
+		request.predicate = NSPredicate(format: "sourceURL == %@", url as NSURL)
+		do {
+			return try context.count(for: request) > 0
+		} catch {
+			Logger.misc.error("Error checking source URL: \(error)")
+			return false
+		}
 	}
 
 	func sourceExists(_ identifier: String) -> Bool {
