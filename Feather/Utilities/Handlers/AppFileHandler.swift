@@ -302,6 +302,15 @@ final class AppFileHandler: NSObject, @unchecked Sendable {
 		}
 	}
 
+	/// The source can send a truncated ZIP that still passes the HTTP status
+	/// check. Give this failure one fresh re-download; never retry security
+	/// violations, missing Payload, or out-of-space errors.
+	static func isRetryableArchiveFailure(_ error: Error) -> Bool {
+		guard let error = error as? ImportedFileHandlerError else { return false }
+		if case .unreadablePackage = error { return true }
+		return false
+	}
+
 	private static func _rejectUnsafeArchiveEntries(_ url: URL, base: URL) throws {
 		guard let entryNames = _zipEntryNames(in: url) else {
 			// Unpacking without a readable central directory skips the path
@@ -374,12 +383,23 @@ final class AppFileHandler: NSObject, @unchecked Sendable {
 		var offset = 0
 
 		while offset < directory.count {
-			guard
-				offset + 46 <= directory.count,
-				_uint32(directory, offset) == 0x02014b50
-			else {
-				return nil
+			guard let signature = _uint32(directory, offset) else { return nil }
+			// ZIP permits an archive-extra-data record or a digital signature
+			// within the central directory. Ksign's unzip accepts these; our
+			// previous scanner rejected the entire (otherwise valid) IPA.
+			if signature == 0x08064b50 {
+				guard let size = _uint32(directory, offset + 4),
+				      UInt64(size) + 8 <= UInt64(directory.count - offset) else { return nil }
+				offset += Int(size) + 8
+				continue
 			}
+			if signature == 0x05054b50 {
+				guard let size = _uint16(directory, offset + 4),
+				      size + 6 <= directory.count - offset else { return nil }
+				offset += size + 6
+				continue
+			}
+			guard signature == 0x02014b50, offset + 46 <= directory.count else { return nil }
 			guard
 				let nameLength = _uint16(directory, offset + 28),
 				let extraLength = _uint16(directory, offset + 30),
