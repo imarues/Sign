@@ -77,14 +77,127 @@ private enum BSRepositoryDiskCache {
 		}
 	}
 
-	// IPA Strong's feed is over 6 MB. GitHub RAW may drop an in-flight
-	// connection on mobile networks; a second delivery path prevents one
-	// unreliable host from making the whole catalogue appear unavailable.
-	// The saved source URL stays canonical regardless of which host wins.
+
+	// The saved source URL is ALWAYS the owner's original GitHub URL.
+	// Only its transport uses a smaller, automatically regenerated mirror.
 	private static let ipaStrongURL = URL(string:
 		"https://raw.githubusercontent.com/sgad73055-code/ipastrong/main/ipastrong.json")!
-	private static let ipaStrongCDN = URL(string:
-		"https://cdn.jsdelivr.net/gh/sgad73055-code/ipastrong@main/ipastrong.json")!
+	private static let mirrorRoots = [
+		"https://cdn.jsdelivr.net/gh/imarues/Sign@catalog-cache/catalog/ipastrong/",
+		"https://raw.githubusercontent.com/imarues/Sign/catalog-cache/catalog/ipastrong/"
+	]
+
+	private struct ChunkManifest: Decodable {
+		let schema: Int
+		let sourceURL: String
+		let contentHash: String
+		let count: Int
+		let batchSize: Int
+		let parts: [String]
+	}
+
+	/// Request the small manifest and chunks from a CDN first, using GitHub
+	/// RAW only as a fallback. Never silently accept a 404/HTML response.
+	private static func mirrorData(_ path: String) async -> Data? {
+		for root in mirrorRoots {
+			guard !Task.isCancelled, let url = URL(string: root + path) else {
+				return nil
+			}
+			var request = URLRequest(url: url)
+			request.timeoutInterval = 16
+			request.cachePolicy = path == "manifest.json"
+				? .reloadIgnoringLocalCacheData : .useProtocolCachePolicy
+			request.setValue("application/json", forHTTPHeaderField: "Accept")
+			do {
+				let (data, response) = try await URLSession.shared.data(for: request)
+				if let response = response as? HTTPURLResponse,
+				   (200...299).contains(response.statusCode), !data.isEmpty {
+					return data
+				}
+			} catch {
+				if Task.isCancelled { return nil }
+				// A different hostname may work when one CDN is unavailable.
+			}
+		}
+		return nil
+	}
+
+	/// A server-side manifest references individually downloadable JSON files,
+	/// each containing at most 250 original app records. Publish the first
+	/// 250 immediately and keep adding the rest. This is genuine progressive
+	/// downloading, not slicing a completed 6 MB response on the UI thread.
+	private static func fetchIPAStrongChunks(
+		progress: (@Sendable (ASRepository, Int, Int) async -> Void)?
+	) async -> FetchOutcome? {
+		guard let manifestData = await mirrorData("manifest.json"),
+		      let manifest = try? JSONDecoder().decode(ChunkManifest.self, from: manifestData),
+		      manifest.schema == 1,
+		      manifest.sourceURL == ipaStrongURL.absoluteString,
+		      manifest.batchSize == 250,
+		      manifest.count > 0,
+		      manifest.count <= 100_000,
+		      manifest.contentHash.range(
+				of: "^[0-9a-f]{20}$", options: .regularExpression
+			  ) != nil,
+		      manifest.parts.count == (manifest.count + 249) / 250,
+		      manifest.parts.allSatisfy({
+				$0.hasPrefix("versions/\(manifest.contentHash)/")
+					&& $0.hasSuffix(".json")
+			  })
+		else {
+			return nil // Older installs / missing mirror: use upstream directly.
+		}
+
+		guard let firstData = await mirrorData(manifest.parts[0]),
+		      var aggregate = try? JSONDecoder().decode(ASRepository.self, from: firstData)
+		else { return nil }
+		var rawParts = [firstData]
+		await progress?(aggregate, 1, manifest.parts.count)
+
+		// Download a few small files concurrently, append them in source order
+		// so catalogue paging and search remain deterministic.
+		for start in stride(from: 1, to: manifest.parts.count, by: 4) {
+			guard !Task.isCancelled else { return nil }
+			let upper = min(start + 4, manifest.parts.count)
+			var completed: [Int: Data] = [:]
+			await withTaskGroup(of: (Int, Data?).self) { group in
+				for index in start..<upper {
+					let file = manifest.parts[index]
+					group.addTask { (index, await mirrorData(file)) }
+				}
+				for await (index, data) in group {
+					if let data { completed[index] = data }
+				}
+			}
+			guard completed.count == upper - start else { return nil }
+			for index in start..<upper {
+				guard let data = completed[index],
+				      let piece = try? JSONDecoder().decode(ASRepository.self, from: data)
+				else { return nil }
+				aggregate.apps.append(contentsOf: piece.apps)
+				rawParts.append(data)
+				await progress?(aggregate, index + 1, manifest.parts.count)
+			}
+		}
+
+		// Persist one complete original-format catalogue for instant offline
+		// use next time. A transient failure must not overwrite a good cache.
+		if let first = rawParts.first,
+		   var combined = (try? JSONSerialization.jsonObject(with: first)) as? [String: Any] {
+			var apps = combined["apps"] as? [Any] ?? []
+			for data in rawParts.dropFirst() {
+				if let next = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+				   let nextApps = next["apps"] as? [Any] {
+					apps.append(contentsOf: nextApps)
+				}
+			}
+			combined["apps"] = apps
+			if let data = try? JSONSerialization.data(withJSONObject: combined) {
+				store(data, for: ipaStrongURL)
+			}
+		}
+		return .success(aggregate)
+	}
 
 	private static func fetchEndpoint(
 		_ endpoint: URL,
@@ -99,7 +212,6 @@ private enum BSRepositoryDiskCache {
 				request.cachePolicy = forceReload
 					? .reloadIgnoringLocalCacheData : .useProtocolCachePolicy
 				request.setValue("application/json, */*", forHTTPHeaderField: "Accept")
-
 				let (data, response) = try await URLSession.shared.data(for: request)
 				if let response = response as? HTTPURLResponse,
 				   !(200...299).contains(response.statusCode) {
@@ -114,9 +226,8 @@ private enum BSRepositoryDiskCache {
 				do {
 					let repository = try JSONDecoder().decode(ASRepository.self, from: data)
 					guard !Task.isCancelled else { return .error("Request cancelled.") }
-					let outcome = FetchOutcome.success(repository)
 					store(data, for: cacheKey)
-					return outcome
+					return .success(repository)
 				} catch {
 					return .error("Source JSON could not be read: \(error.localizedDescription)")
 				}
@@ -132,43 +243,18 @@ private enum BSRepositoryDiskCache {
 		return .error("Source could not be refreshed.")
 	}
 
-	static func fetch(from url: URL, forceReload: Bool) async -> FetchOutcome {
-		guard url == ipaStrongURL else {
-			return await fetchEndpoint(url, cacheKey: url, forceReload: forceReload)
+	static func fetch(
+		from url: URL,
+		forceReload: Bool,
+		progress: (@Sendable (ASRepository, Int, Int) async -> Void)? = nil
+	) async -> FetchOutcome {
+		if url == ipaStrongURL,
+		   let result = await fetchIPAStrongChunks(progress: progress) {
+			return result
 		}
-
-		// Start the canonical source immediately. If it is not quick, try a
-		// CDN independently and accept the first valid, completely decoded
-		// catalogue. Refreshes give the canonical URL a longer head start to
-		// favour newer data over the CDN's branch cache.
-		return await withTaskGroup(of: FetchOutcome.self) { group in
-			group.addTask {
-				await fetchEndpoint(url, cacheKey: url, forceReload: forceReload)
-			}
-			group.addTask {
-				do {
-					try await Task.sleep(
-						nanoseconds: forceReload ? 3_500_000_000 : 900_000_000
-					)
-				} catch {
-					return .error("Request cancelled.")
-				}
-				guard !Task.isCancelled else { return .error("Request cancelled.") }
-				return await fetchEndpoint(ipaStrongCDN, cacheKey: url, forceReload: false)
-			}
-
-			var lastFailure = FetchOutcome.error("Source could not be refreshed.")
-			for await outcome in group {
-				if outcome.repository != nil {
-					group.cancelAll()
-					return outcome
-				}
-				if outcome.failure != "Request cancelled." {
-					lastFailure = outcome
-				}
-			}
-			return lastFailure
-		}
+		// Safe fallback for first-run mirror setup / blocked CDN / broken
+		// chunks. This is the exact canonical URL, not another source.
+		return await fetchEndpoint(url, cacheKey: url, forceReload: forceReload)
 	}
 
 }
@@ -204,11 +290,29 @@ final class SourcesViewModel: ObservableObject {
 	/// fetch that delays every new source behind one slow catalogue.
 	private var _networkTasks: [URL: Task<BSRepositoryDiskCache.FetchOutcome, Never>] = [:]
 	private var _activeFetchCalls = 0
+	private var _partiallyLoadedURLs = Set<URL>()
+
+	/// Do not replace a complete, previously cached catalogue with an
+	/// incomplete refresh. On a cold load, each 250-item arrival is visible.
+	private func _publishPartial(_ repository: ASRepository, from url: URL) {
+		let matches = Storage.shared.getSources().filter { $0.sourceURL == url }
+		guard !matches.isEmpty else { return }
+		let canPublish = _partiallyLoadedURLs.contains(url)
+			|| matches.contains(where: { sources[$0] == nil })
+		guard canPublish else { return }
+		_partiallyLoadedURLs.insert(url)
+		let count = BSAppIndex.uniqueCount(in: repository)
+		for source in matches {
+			_apply(repository, to: source, uniqueAppCount: count)
+		}
+	}
 
 	private func _networkTask(for url: URL, forceReload: Bool) -> Task<BSRepositoryDiskCache.FetchOutcome, Never> {
 		if let task = _networkTasks[url] { return task }
-		let task = Task.detached(priority: .userInitiated) {
-			await BSRepositoryDiskCache.fetch(from: url, forceReload: forceReload)
+		let task = Task.detached(priority: .userInitiated) { [weak self] in
+			await BSRepositoryDiskCache.fetch(from: url, forceReload: forceReload) { repository, _, _ in
+				await self?._publishPartial(repository, from: url)
+			}
 		}
 		_networkTasks[url] = task
 		return task
@@ -315,6 +419,7 @@ final class SourcesViewModel: ObservableObject {
 						sourceFailures[url] = outcome.failure ?? "Source refresh failed."
 					}
 					loadingURLs.remove(url)
+					_partiallyLoadedURLs.remove(url)
 					// A failed refresh keeps the last successfully cached catalogue.
 					_networkTasks[url] = nil
 				}
