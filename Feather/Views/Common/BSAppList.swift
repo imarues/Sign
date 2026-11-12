@@ -99,24 +99,7 @@ enum BSAppIndex {
 					app: app
 				)
 
-				let nameKey = _normalized(app.currentName)
-				let developerKey = _normalized(app.developer ?? "")
-				let bundle = app.id?.trimmingCharacters(in: .whitespacesAndNewlines)
-
-				let identity: String
-				if let bundle, !bundle.isEmpty {
-					// Name is part of the identity on purpose. Repositories often
-					// publish patched/alternate variants under the same bundle id.
-					identity = "id:\(bundle.lowercased())|name:\(nameKey)"
-				} else if !nameKey.isEmpty, nameKey != "unknown" {
-					identity = "name:\(nameKey)|developer:\(developerKey)"
-				} else if let url = app.currentDownloadUrl {
-					identity = "url:\(url.absoluteString)"
-				} else {
-					identity = "entry:\(app.currentUniqueId)"
-				}
-
-				let key = "\(sourceKey)|\(identity)"
+				let key = "\(sourceKey)|\(_identity(for: app))"
 				guard let existing = newest[key] else {
 					newest[key] = item
 					continue
@@ -143,6 +126,35 @@ enum BSAppIndex {
 		return newest.values.sorted {
 			$0.app.currentName.localizedCaseInsensitiveCompare($1.app.currentName) == .orderedAscending
 		}
+	}
+
+	/// The Sources tab must show how many distinct app rows the user will
+	/// actually see, not the raw number of records in a large JSON feed.
+	/// Use the exact same identity rules as build() so the badge and list agree.
+	static func uniqueCount(in repository: ASRepository) -> Int {
+		var identities = Set<String>()
+		identities.reserveCapacity(repository.apps.count)
+		for app in repository.apps {
+			identities.insert(_identity(for: app))
+		}
+		return identities.count
+	}
+
+	private static func _identity(for app: ASRepository.App) -> String {
+		let nameKey = _normalized(app.currentName)
+		let developerKey = _normalized(app.developer ?? "")
+		let bundle = app.id?.trimmingCharacters(in: .whitespacesAndNewlines)
+		if let bundle, !bundle.isEmpty {
+			// Variants with different names may coexist under one bundle ID.
+			return "id:\(bundle.lowercased())|name:\(nameKey)"
+		}
+		if !nameKey.isEmpty, nameKey != "unknown" {
+			return "name:\(nameKey)|developer:\(developerKey)"
+		}
+		if let url = app.currentDownloadUrl {
+			return "url:\(url.absoluteString)"
+		}
+		return "entry:\(app.currentUniqueId)"
 	}
 
 	// MARK: Search
