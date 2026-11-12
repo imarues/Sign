@@ -63,13 +63,17 @@ private enum BSRepositoryDiskCache {
 
 	struct FetchOutcome: Sendable {
 		let repository: ASRepository?
+		let uniqueAppCount: Int?
 		let failure: String?
 
 		static func success(_ repository: ASRepository) -> Self {
-			.init(repository: repository, failure: nil)
+			// Count in the background with the same rules as the displayed list.
+			.init(repository: repository,
+			      uniqueAppCount: BSAppIndex.uniqueCount(in: repository),
+			      failure: nil)
 		}
 		static func error(_ message: String) -> Self {
-			.init(repository: nil, failure: message)
+			.init(repository: nil, uniqueAppCount: nil, failure: message)
 		}
 	}
 
@@ -126,6 +130,7 @@ final class SourcesViewModel: ObservableObject {
 	@Published private(set) var isFinished = true
 	@Published private(set) var revision = 0
 	@Published var sources: [AltSource: ASRepository] = [:]
+	@Published private(set) var distinctAppCounts: [URL: Int] = [:]
 	@Published private(set) var sourceFailures: [URL: String] = [:]
 	@Published private(set) var loadingURLs: Set<URL> = []
 
@@ -154,9 +159,12 @@ final class SourcesViewModel: ObservableObject {
 		return task
 	}
 
-	private func _apply(_ repository: ASRepository, to source: AltSource) {
+	private func _apply(_ repository: ASRepository, to source: AltSource, uniqueAppCount: Int) {
 		sources[source] = repository
-		if let url = source.sourceURL { sourceFailures[url] = nil }
+		if let url = source.sourceURL {
+			sourceFailures[url] = nil
+			distinctAppCounts[url] = uniqueAppCount
+		}
 		revision &+= 1
 		// A source is visible immediately after saving its URL. Replace the
 		// temporary hostname and icon as soon as its first fetch succeeds.
@@ -207,15 +215,18 @@ final class SourcesViewModel: ObservableObject {
 
 		if !refresh {
 			// Use the disk copy without waiting for *all* cache reads.
-			await withTaskGroup(of: (URL, ASRepository?).self) { group in
+			await withTaskGroup(of: (URL, ASRepository?, Int?).self) { group in
 				for (_, url) in sourcesArray {
-					group.addTask { (url, BSRepositoryDiskCache.load(from: url)) }
+					group.addTask {
+						let repository = BSRepositoryDiskCache.load(from: url)
+						return (url, repository, repository.map { BSAppIndex.uniqueCount(in: $0) })
+					}
 				}
-				for await (url, repository) in group {
-					guard let repository else { continue }
+				for await (url, repository, uniqueAppCount) in group {
+					guard let repository, let uniqueAppCount else { continue }
 					for pair in sourcesArray where pair.url == url {
 						if self.sources[pair.source] == nil {
-							self._apply(repository, to: pair.source)
+							self._apply(repository, to: pair.source, uniqueAppCount: uniqueAppCount)
 						}
 					}
 				}
@@ -235,9 +246,10 @@ final class SourcesViewModel: ObservableObject {
 					group.addTask { (item.url, await item.task.value) }
 				}
 				for await (url, outcome) in group {
-					if let repository = outcome.repository {
+					if let repository = outcome.repository,
+					   let uniqueAppCount = outcome.uniqueAppCount {
 						for pair in batch where pair.url == url {
-							self._apply(repository, to: pair.source)
+							self._apply(repository, to: pair.source, uniqueAppCount: uniqueAppCount)
 						}
 					} else {
 						sourceFailures[url] = outcome.failure ?? "Source refresh failed."
