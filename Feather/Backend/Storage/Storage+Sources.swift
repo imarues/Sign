@@ -110,49 +110,114 @@ extension Storage {
 		completion(nil)
 	}
 
-	/// Normalise the already-added IPA Strong catalogue to its official
-	/// canonical GitHub RAW URL, without adding extra sources or touching the
-	/// primary iKiraPlus source. Keep the existing Core Data object so source
-	/// preferences and update settings survive.
-	/// Keep exactly one IPA Strong entry, with exactly the owner's canonical
-	/// URL. Earlier builds used alternate URLs/identifiers and could leave an
-	/// extra hostname-only row when the canonical entry was already present.
-	/// Never modify or remove the iKiraPlus catalogue or unrelated sources.
-	func normaliseIPAstrongSourceURL() {
-		guard let canonical = URL(string:
-			"https://raw.githubusercontent.com/sgad73055-code/ipastrong/main/ipastrong.json"
-		) else { return }
+	/// A one-time, atomic repair of bundled sources on existing installations.
+	///
+	/// Old releases silently inserted \`/refs/heads/main/ipastrong.json\` on
+	/// every launch. Changing that URL in another migration only created a
+	/// second row, while the old bootstrap inserted the first one again.
+	/// The owner requested a clean reset: retain iKiraPlus, remove ALL other
+	/// old catalogue rows once, and create exactly one new IPA Strong entry.
+	/// Signing certificates, imported IPAs, and the app Library are untouched.
+	func installCleanCatalogSources() {
+		let mainURL = URL(string: "https://ikiraplus.pages.dev/IPA-AR.json")!
+		let strongURL = URL(string:
+			"https://raw.githubusercontent.com/sgad73055-code/ipastrong/main/ipastrong.json")!
+		let migrationKey = "BatSign.didCleanReinstallIPAstrong250V1"
+		let needsReset = !UserDefaults.standard.bool(forKey: migrationKey)
 
-		let matching = getSources().filter { source in
-			let name = (source.name ?? "")
-				.trimmingCharacters(in: .whitespacesAndNewlines)
-				.lowercased()
-			let path = (source.sourceURL?.path ?? "").lowercased()
-			let id = (source.identifier ?? "").lowercased()
-			return source.sourceURL == canonical
-				|| path.contains("/sgad73055-code/ipastrong/")
-				|| name == "ipastrong"
-				|| id == "ipastrong"
-		}
-		guard !matching.isEmpty else { return }
-
-		// Prefer the already-canonical row so its settings, identifier and
-		// underlying Core Data identity remain stable across upgrades.
-		let keeper = matching.first(where: { $0.sourceURL == canonical }) ?? matching[0]
-		for duplicate in matching where duplicate.objectID != keeper.objectID {
-			context.delete(duplicate)
+		let request: NSFetchRequest<AltSource> = AltSource.fetchRequest()
+		let all: [AltSource]
+		do {
+			all = try context.fetch(request)
+		} catch {
+			Logger.misc.error("Unable to inspect sources during repair: \(error)")
+			return
 		}
 
-		keeper.sourceURL = canonical
-		keeper.name = "ipastrong"
-		// The original JSON identifier can overlap with a different source.
-		let otherIDs = Set(getSources().filter {
-			$0.objectID != keeper.objectID && !$0.isDeleted
-		}.compactMap(\.identifier))
-		if let identifier = keeper.identifier, otherIDs.contains(identifier) {
-			keeper.identifier = canonical.absoluteString
+		var staleURLs = Set<URL>()
+		var keptMain = false
+		var keptStrong = false
+		for source in all {
+			let url = source.sourceURL
+			if url == mainURL {
+				if keptMain {
+					context.delete(source)
+				} else {
+					keptMain = true
+				}
+				continue
+			}
+
+			if url == strongURL, !needsReset, !keptStrong {
+				keptStrong = true
+				source.name = "IPA Strong"
+				source.identifier = strongURL.absoluteString
+				continue
+			}
+
+			let name = (source.name ?? "").lowercased()
+			let identifier = (source.identifier ?? "").lowercased()
+			let urlString = url?.absoluteString.lowercased() ?? ""
+			let isLegacyStrong = name.contains("ipastrong")
+				|| identifier.contains("ipastrong")
+				|| urlString.contains("ipastrong")
+				|| urlString.contains("/sgad73055-code/")
+
+			if needsReset || isLegacyStrong || url == strongURL {
+				if let url { staleURLs.insert(url) }
+				context.delete(source)
+			}
 		}
-		_ = saveContext()
+
+		if !keptMain {
+			let source = AltSource(context: context)
+			source.sourceURL = mainURL
+			source.identifier = mainURL.absoluteString
+			source.name = "iKiraPlus - IPA Store"
+			source.date = Date()
+		}
+
+		if !keptStrong {
+			let source = AltSource(context: context)
+			source.sourceURL = strongURL
+			source.identifier = strongURL.absoluteString
+			source.name = "IPA Strong"
+			source.date = Date()
+		}
+
+		if let error = saveContext() {
+			Logger.misc.error("Catalogue repair failed; will retry at launch: \(error)")
+			return
+		}
+
+		// Purge old source feed files only AFTER successful Core Data commit.
+		// The primary catalogue's cache is intentionally preserved.
+		if needsReset {
+			staleURLs.insert(strongURL)
+		}
+		for url in staleURLs where url != mainURL {
+			purgeCachedSource(url)
+		}
+		if needsReset {
+			UserDefaults.standard.set(true, forKey: migrationKey)
+		}
+	}
+
+	/// The cache key must match BSRepositoryDiskCache.filename(for:).
+	/// Delete only removed source caches, never the primary iKiraPlus cache.
+	private func purgeCachedSource(_ url: URL) {
+		var hash: UInt64 = 14_695_981_039_346_656_037
+		for byte in url.absoluteString.utf8 {
+			hash ^= UInt64(byte)
+			hash &*= 1_099_511_628_211
+		}
+		guard let root = FileManager.default.urls(
+			for: .cachesDirectory, in: .userDomainMask
+		).first else { return }
+		let file = root.appendingPathComponent(
+			"BatSignSourceRepositories", isDirectory: true
+		).appendingPathComponent(String(hash, radix: 16) + ".json")
+		try? FileManager.default.removeItem(at: file)
 	}
 
 	func deleteSource(for source: AltSource) {
