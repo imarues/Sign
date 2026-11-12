@@ -286,7 +286,7 @@ extension DiscoverView {
 					.foregroundStyle(BSStore.tertiary)
 				Text("No Sources")
 					.font(.system(size: 20, weight: .bold, design: .rounded))
-				Text("Add a repository on the Sources tab and its apps appear here as today's stories.")
+				Text("اضغط زر المصادر بالأعلى لإضافة سورس وعرض التطبيقات هنا.")
 					.font(.system(size: 14))
 					.foregroundStyle(BSStore.secondary)
 					.multilineTextAlignment(.center)
