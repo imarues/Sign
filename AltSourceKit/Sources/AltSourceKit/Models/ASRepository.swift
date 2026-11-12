@@ -69,7 +69,7 @@ public struct ASRepository: Sendable, Decodable, Hashable, Identifiable {
 			forKey: .headerURL
 		)
 		self.tintColor =
-			try container.decodeIfPresent(Color.self, forKey: .tintColor)
+			try? container.decodeIfPresent(Color.self, forKey: .tintColor)
 
 		let patreonString = try container.decodeIfPresent(String.self, forKey: .patreonURL)
 		
@@ -84,7 +84,7 @@ public struct ASRepository: Sendable, Decodable, Hashable, Identifiable {
 			self.patreonURL = nil
 		}
 
-		self.userInfo = try container.decodeIfPresent(
+		self.userInfo = try? container.decodeIfPresent(
 			UserInfo.self,
 			forKey: .userInfo
 		)
@@ -107,8 +107,8 @@ public struct ASRepository: Sendable, Decodable, Hashable, Identifiable {
 		
 		self.apps = apps
 		self.featuredApps =
-			try container.decodeIfPresent([App.ID].self, forKey: .featuredApps) ?? []
-		self.news = try container.decodeIfPresent([News].self, forKey: .news) ?? []
+			(try? container.decodeIfPresent([App.ID].self, forKey: .featuredApps)) ?? []
+		self.news = (try? container.decodeIfPresent([News].self, forKey: .news)) ?? []
 	}
 
 	public enum CodingKeys: String, CodingKey {
@@ -196,6 +196,13 @@ extension ASRepository {
 		public var screenshotURLs: [URL]?
 		
 		public var marketplaceID: String?
+
+		private struct RecoverableVersion: Decodable {
+			let value: Version?
+			init(from decoder: any Decoder) throws {
+				value = try? Version(from: decoder)
+			}
+		}
 
 		public struct Screenshots: Decodable, Hashable, Sendable {
 			/// One app shot: its URL, and the pixel size the source declared for it
@@ -332,10 +339,10 @@ extension ASRepository {
 
 			self.developer = try container.decodeIfPresent(String.self, forKey: .developer)
 
-			self.versions = try container.decodeIfPresent(
-				[Version].self,
+			self.versions = try? container.decodeIfPresent(
+				[RecoverableVersion].self,
 				forKey: .versions
-			)
+			)?.compactMap(\.value)
 
 			self.version = try container.decodeIfPresent(
 				String.self,
