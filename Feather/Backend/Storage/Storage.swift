@@ -170,20 +170,13 @@ final class Storage: ObservableObject {
 		}
 	}
 
-	/// Ensure both bundled catalogues are present after the persistent store is
-	/// ready. Each source is fetched independently so an unavailable source never
-	/// blocks the other one from being added. `silent` keeps launch clean when a
-	/// source is already present or temporarily unreachable.
+	/// Repair the persisted source list before any catalogue views request
+	/// network data. The old '/refs/heads/main/' auto-seed is permanently gone.
+	/// The migration is safe if the store reloads after a recoverable error.
 	private func _ensureDefaultSource() {
-		FR.handleSource(
-			"https://ikiraplus.pages.dev/IPA-AR.json",
-			silent: true
-		) { }
-
-		FR.handleSource(
-			"https://raw.githubusercontent.com/sgad73055-code/ipastrong/refs/heads/main/ipastrong.json",
-			silent: true
-		) { }
+		context.performAndWait {
+			installCleanCatalogSources()
+		}
 	}
 
 	/// Whether a store is damaged rather than merely out of reach.
