@@ -197,7 +197,13 @@ struct InstallPreviewView: View {
 						await MainActor.run {
 							waitingForLocalServer = installer.isWaitingForAnotherInstall
 						}
-						try await installer.waitForPackage(packageUrl)
+						// The user explicitly tapped Install after a previous iOS prompt
+						// may have been cancelled. Reclaim only this same app's
+						// unstarted OTA request; never interrupt a payload in flight.
+						try await installer.waitForPackage(
+							packageUrl,
+							retryCancelledSameApp: true
+						)
 						await MainActor.run {
 							waitingForLocalServer = false
 							viewModel.status = .ready
