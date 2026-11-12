@@ -64,22 +64,8 @@ class ServerInstaller: Identifiable, ObservableObject {
 		self.viewModel = viewModel
 
 		if getServerMethod() == 0 {
-			do {
-				Self.loopbackLock.lock()
-				defer { Self.loopbackLock.unlock() }
-				if let server = Self.sharedLoopbackServer, server.listenerFailure == nil {
-					_gboxServer = server
-				} else {
-					// A failed listener is replaced on the next attempt so that
-					// another app releasing port 9800 doesn't require a relaunch.
-					Self.sharedLoopbackServer?.stop()
-					let server = try GBoxLoopbackServer(port: UInt16(port))
-					Self.sharedLoopbackServer = server
-					_gboxServer = server
-				}
-			} catch {
-				startupError = error
-			}
+			do { try _attachLoopback() }
+			catch { startupError = error }
 			return
 		}
 
@@ -104,43 +90,69 @@ class ServerInstaller: Identifiable, ObservableObject {
 		_gboxServer?.isClaimed(byOtherThan: id) ?? false
 	}
 
+	/// Share a single listener across manual and automatic installations.
+	/// NWListener.start() is asynchronous: an object existing is not proof the
+	/// socket was bound. Re-create failed listeners and wait for .ready before
+	/// opening the manifest. A port still held by another app is reported as
+	/// such, never converted to an unrelated pairing/VPN error.
+	private func _attachLoopback() throws {
+		Self.loopbackLock.lock()
+		defer { Self.loopbackLock.unlock() }
+		if let live = Self.sharedLoopbackServer,
+		   !live.hasStopped, live.listenerFailure == nil {
+			_gboxServer = live
+		} else {
+			Self.sharedLoopbackServer?.stop()
+			let fresh = try GBoxLoopbackServer(port: UInt16(port))
+			Self.sharedLoopbackServer = fresh
+			_gboxServer = fresh
+		}
+		startupError = nil
+	}
+
+	private func _busyPortError() -> NSError {
+		NSError(domain: "BatSign.GBoxLoopback", code: 48,
+		        userInfo: [NSLocalizedDescriptionKey:
+			"Port 9800 is already in use by another installer. Close the other signing app (including Ksign) and retry. No pairing file or VPN is needed for OTA installation."])
+	}
+
 	@MainActor
-	func waitForPackage(_ url: URL, timeout: TimeInterval = 150) async throws {
+	func waitForPackage(_ url: URL, timeout: TimeInterval = 24) async throws {
 		guard getServerMethod() == 0 else {
 			packageUrl = url
+			if let startupError { throw startupError }
 			return
 		}
-		guard let server = _gboxServer else {
-			throw startupError ?? NSError(
-				domain: "BatSign.Installation", code: 50,
-				userInfo: [NSLocalizedDescriptionKey: "The local install server is unavailable."]
-			)
-		}
-
 		let deadline = Date().addingTimeInterval(timeout)
-		while true {
+		var lastError: Error?
+		while Date() < deadline {
 			try Task.checkCancellation()
-			if let error = server.listenerFailure { throw error }
-			if !server.isClaimed(byOtherThan: id) {
-				// Assigning the package activates the same locked claim as existing
-				// single-install callers. Re-check after assignment for races.
-				packageUrl = url
-				if startupError == nil { return }
+			if _gboxServer == nil ||
+			   _gboxServer?.hasStopped == true ||
+			   _gboxServer?.listenerFailure != nil {
+				lastError = _gboxServer?.listenerFailure ?? startupError
+				do { try _attachLoopback() } catch { lastError = error }
 			}
-			if Date() >= deadline {
-				throw NSError(
-					domain: "BatSign.Installation", code: 48,
-					userInfo: [NSLocalizedDescriptionKey:
-						"A previous install is still waiting for iOS. Finish or cancel its installation prompt before trying again."]
-				)
+			if let server = _gboxServer, server.isReady {
+				if !server.isClaimed(byOtherThan: id) {
+					packageUrl = url
+					if startupError == nil { return }
+					lastError = startupError
+				}
+			} else if let error = _gboxServer?.listenerFailure {
+				lastError = error
 			}
-			try await Task.sleep(nanoseconds: 350_000_000)
+			try await Task.sleep(nanoseconds: 600_000_000)
 		}
+		throw lastError.map { error -> Error in
+			let ns = error as NSError
+			return ns.code == 48 ? _busyPortError() : error
+		} ?? _busyPortError()
 	}
 
 	var isAvailable: Bool {
 		if getServerMethod() == 0 {
-			return _gboxServer != nil && startupError == nil
+			return _gboxServer?.isReady == true && startupError == nil
 		}
 		return _server != nil
 	}
@@ -247,7 +259,20 @@ private final class GBoxLoopbackServer {
 	private var _packageURL: URL?
 	private var claimedBy: UUID?
 	private var _listenerFailure: Error?
+	private var _ready = false
 	private var stopped = false
+
+	var isReady: Bool {
+		packageLock.lock()
+		defer { packageLock.unlock() }
+		return _ready && !stopped
+	}
+
+	var hasStopped: Bool {
+		packageLock.lock()
+		defer { packageLock.unlock() }
+		return stopped
+	}
 
 	var packageURL: URL? {
 		packageLock.lock()
@@ -330,21 +355,38 @@ private final class GBoxLoopbackServer {
 		}
 		listener.stateUpdateHandler = { [weak self] state in
 			guard let self else { return }
-			if case .failed(let error) = state {
+			switch state {
+			case .ready:
 				self.packageLock.lock()
+				self._ready = true
+				self._listenerFailure = nil
+				self.packageLock.unlock()
+			case .failed(let error):
+				self.packageLock.lock()
+				self._ready = false
 				self._listenerFailure = error
 				let handler = self.onError
 				self.packageLock.unlock()
 				handler?(error)
+			case .cancelled:
+				self.packageLock.lock()
+				self._ready = false
+				self.stopped = true
+				self.packageLock.unlock()
+			default:
+				break
 			}
 		}
 		listener.start(queue: queue)
 	}
 
 	func stop() {
-		guard !stopped else { return }
+		packageLock.lock()
+		let shouldCancel = !stopped
 		stopped = true
-		listener.cancel()
+		_ready = false
+		packageLock.unlock()
+		if shouldCancel { listener.cancel() }
 	}
 
 	private func _accept(_ connection: NWConnection) {
