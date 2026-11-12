@@ -96,30 +96,40 @@ private enum BSRepositoryDiskCache {
 		let parts: [String]
 	}
 
-	/// Request the small manifest and chunks from a CDN first, using GitHub
-	/// RAW only as a fallback. Never silently accept a 404/HTML response.
+	/// Race the two independent delivery hosts. A blocked CDN must not cost
+	/// another 16 seconds before the GitHub mirror is even attempted.
+	/// Accept only a successful JSON response, never a redirect/404 document.
 	private static func mirrorData(_ path: String) async -> Data? {
-		for root in mirrorRoots {
-			guard !Task.isCancelled, let url = URL(string: root + path) else {
-				return nil
+		await withTaskGroup(of: Data?.self) { group in
+			for root in mirrorRoots {
+				group.addTask {
+					guard !Task.isCancelled,
+					      let url = URL(string: root + path) else { return nil }
+					var request = URLRequest(url: url)
+					request.timeoutInterval = 12
+					request.cachePolicy = path == "manifest.json"
+						? .reloadIgnoringLocalCacheData : .useProtocolCachePolicy
+					request.setValue("application/json", forHTTPHeaderField: "Accept")
+					do {
+						let (data, response) = try await URLSession.shared.data(for: request)
+						guard !Task.isCancelled,
+						      let response = response as? HTTPURLResponse,
+						      (200...299).contains(response.statusCode),
+						      !data.isEmpty else { return nil }
+						return data
+					} catch {
+						return nil
+					}
+				}
 			}
-			var request = URLRequest(url: url)
-			request.timeoutInterval = 16
-			request.cachePolicy = path == "manifest.json"
-				? .reloadIgnoringLocalCacheData : .useProtocolCachePolicy
-			request.setValue("application/json", forHTTPHeaderField: "Accept")
-			do {
-				let (data, response) = try await URLSession.shared.data(for: request)
-				if let response = response as? HTTPURLResponse,
-				   (200...299).contains(response.statusCode), !data.isEmpty {
+			for await data in group {
+				if let data {
+					group.cancelAll()
 					return data
 				}
-			} catch {
-				if Task.isCancelled { return nil }
-				// A different hostname may work when one CDN is unavailable.
 			}
+			return nil
 		}
-		return nil
 	}
 
 	/// A server-side manifest references individually downloadable JSON files,
@@ -248,12 +258,15 @@ private enum BSRepositoryDiskCache {
 		forceReload: Bool,
 		progress: (@Sendable (ASRepository, Int, Int) async -> Void)? = nil
 	) async -> FetchOutcome {
-		if url == ipaStrongURL,
-		   let result = await fetchIPAStrongChunks(progress: progress) {
-			return result
+		if url == ipaStrongURL {
+			// Always use 250-app chunks for IPA Strong. Falling back to the
+			// original 6.3 MB JSON recreates the exact long "Refreshing..."
+			// failure this migration is meant to fix.
+			if let result = await fetchIPAStrongChunks(progress: progress) {
+				return result
+			}
+			return .error("IPA Strong batches are temporarily unavailable. Pull to retry.")
 		}
-		// Safe fallback for first-run mirror setup / blocked CDN / broken
-		// chunks. This is the exact canonical URL, not another source.
 		return await fetchEndpoint(url, cacheKey: url, forceReload: forceReload)
 	}
 
