@@ -163,6 +163,9 @@ class Download: Identifiable, @unchecked Sendable {
 	/// a late duplicate callback — the background session can deliver the same
 	/// finished file twice across a wake-up — cannot import the package twice.
 	var didStartProcessing = false
+	/// Ksign-style second chance when a server sent an unreadable IPA. One
+	/// retry only; a permanently broken source must not loop forever.
+	var didRetryUnreadableIPA = false
 
 	let id: String
 	let url: URL
@@ -1233,6 +1236,19 @@ extension DownloadManager: URLSessionDownloadDelegate {
 	func handlePachageFile(url: URL, dl: Download) throws {
 		Self.log.notice("download: handing \(dl.id.prefix(8), privacy: .public) to the importer — \(url.lastPathComponent, privacy: .public)")
 		FR.handlePackageFile(url, download: dl) { err in
+			if let err,
+			   AppFileHandler.isRetryableArchiveFailure(err),
+			   !dl.didRetryUnreadableIPA {
+				// ZIP metadata was readable but the actual entries couldn't be
+				// extracted. The mirror may have truncated individual members.
+				// Re-fetch once into owned storage, then use the same importer.
+				dl.didRetryUnreadableIPA = true
+				DispatchQueue.main.async {
+					guard DownloadManager.shared.downloads.contains(where: { $0 === dl }) else { return }
+					DownloadManager.shared._beginRescue(for: dl, suggestedFileName: url.lastPathComponent)
+				}
+				return
+			}
 			if err != nil {
 				let generator = UINotificationFeedbackGenerator()
 				generator.notificationOccurred(.error)
@@ -1553,6 +1569,7 @@ extension DownloadManager: URLSessionDownloadDelegate {
 			// unzip later as the zip error the user reported; caught here, they
 			// are told for what they are instead.
 			guard Self._hasZipSignature(at: destinationURL) else {
+				download.didRetryUnreadableIPA = true
 				Self.log.error("download: the delivered IPA is incomplete or has no readable Payload — \(destinationURL.lastPathComponent, privacy: .public)")
 				try? FileManager.default.removeItem(at: destinationURL)
 				// Some mirrors finish an HTTP 200 response before the IPA's ZIP
