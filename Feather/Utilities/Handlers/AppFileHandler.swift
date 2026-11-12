@@ -275,6 +275,18 @@ final class AppFileHandler: NSObject, @unchecked Sendable {
 		try _fileManager.removeFileIfNeeded(at: _uniqueWorkDir)
 	}
 
+	/// Check the whole ZIP central directory before an OTA download is
+	/// handed to signing. Checking only the leading "PK" bytes lets truncated
+	/// transfers and HTML responses disguised as IPA files reach the importer.
+	/// A real IPA needs a readable directory and an app under Payload.
+	static func isReadablePackage(at url: URL) -> Bool {
+		guard let names = _zipEntryNames(in: url) else { return false }
+		return names.contains {
+			$0.hasPrefix("Payload/") &&
+			($0.contains(".app/") || $0.hasSuffix(".app"))
+		}
+	}
+
 	private static func _rejectUnsafeArchiveEntries(_ url: URL, base: URL) throws {
 		guard let entryNames = _zipEntryNames(in: url) else {
 			// Unpacking without a readable central directory skips the path
@@ -306,7 +318,10 @@ final class AppFileHandler: NSObject, @unchecked Sendable {
 		guard let tail = _read(handle, at: fileSize - Int64(tailLength), length: tailLength) else {
 			return nil
 		}
-		guard let eocd = _lastIndex(of: 0x06054b50, in: tail) else { return nil }
+		// EOCD signatures can occur inside the optional ZIP comment. The
+		// real record must account for every remaining byte in the archive;
+		// otherwise a partial download can look like a valid ZIP header.
+		guard let eocd = _endOfCentralDirectory(in: tail) else { return nil }
 
 		var directoryOffset = UInt64(_uint32(tail, eocd + 16) ?? 0)
 		var directoryLength = UInt64(_uint32(tail, eocd + 12) ?? 0)
@@ -385,23 +400,13 @@ final class AppFileHandler: NSObject, @unchecked Sendable {
 		}
 	}
 
-	private static func _lastIndex(of signature: UInt32, in data: Data) -> Int? {
-		let bytes: [UInt8] = [
-			UInt8(signature & 0xff),
-			UInt8((signature >> 8) & 0xff),
-			UInt8((signature >> 16) & 0xff),
-			UInt8((signature >> 24) & 0xff)
-		]
-		guard data.count >= bytes.count else { return nil }
-		for index in stride(from: data.count - bytes.count, through: 0, by: -1) {
-			if
-				data[index] == bytes[0],
-				data[index + 1] == bytes[1],
-				data[index + 2] == bytes[2],
-				data[index + 3] == bytes[3]
-			{
-				return index
-			}
+	private static func _endOfCentralDirectory(in data: Data) -> Int? {
+		guard data.count >= 22 else { return nil }
+		for offset in stride(from: data.count - 22, through: 0, by: -1) {
+			guard _uint32(data, offset) == 0x06054b50,
+			      let commentLength = _uint16(data, offset + 20),
+			      offset + 22 + commentLength == data.count else { continue }
+			return offset
 		}
 		return nil
 	}
