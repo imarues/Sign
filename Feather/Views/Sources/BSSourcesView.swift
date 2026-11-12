@@ -135,7 +135,7 @@ struct BSSourcesView: View {
 				SourcesAddView()
 			}
 		}
-		.task(id: Array(_sources)) {
+		.task(id: _sources.map(\.objectID)) {
 			await _viewModel.fetchSources(_sources)
 			_autoSourceOverrides = UserDefaults.standard.dictionary(forKey: "BatSign.sourceAutoUpdate") as? [String: Bool] ?? [:]
 		}
@@ -151,7 +151,7 @@ extension BSSourcesView {
 			WSAppIcon(url: source.iconURL, size: 46, cornerRadius: 10.5)
 
 			VStack(alignment: .leading, spacing: 2) {
-				Text(source.name ?? "Source")
+				Text(_sourceDisplayName(source))
 					.font(.system(size: 17, weight: .semibold))
 					.foregroundStyle(.primary)
 					.lineLimit(1)
@@ -171,6 +171,16 @@ extension BSSourcesView {
 		.padding(.horizontal, 16)
 		.padding(.vertical, 10)
 		.contentShape(Rectangle())
+	}
+
+	private func _sourceDisplayName(_ source: AltSource) -> String {
+		let name = source.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+		let isIPAStrong = source.sourceURL?.absoluteString ==
+			"https://raw.githubusercontent.com/sgad73055-code/ipastrong/main/ipastrong.json"
+		if isIPAStrong && (name.isEmpty || name == "Unknown" || name == "raw.githubusercontent.com") {
+			return "IPA Strong"
+		}
+		return name.isEmpty ? "Source" : name
 	}
 
 	private func _caption(_ source: AltSource) -> String {
