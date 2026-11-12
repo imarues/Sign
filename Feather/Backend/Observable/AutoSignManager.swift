@@ -1424,8 +1424,13 @@ final class AutoSignManager: ObservableObject {
 			_pendingHandOff = nil
 			return
 		}
-		// Already accepted once — a notification would be news of an install
-		// that is already arriving.
+		// Match Ksign's one-prompt hand-off: a successful open() means the
+		// system accepted the request. Never tell the user the prompt wasn't
+		// seen merely because the private install-progress API stayed silent.
+		guard !pending.accepted else {
+			Self.handOffLog.notice("install: no false fallback — iOS accepted the prompt")
+			return
+		}
 		guard !BSInstallWatcher.shared.hasSeenSystemProgress else { return }
 
 		// One channel, and the right sentence for it. Outside, the notification is
