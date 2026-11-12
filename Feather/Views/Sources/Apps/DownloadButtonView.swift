@@ -6,7 +6,6 @@
 //
 
 import SwiftUI
-import Combine
 import AltSourceKit
 import NimbleViews
 
@@ -16,31 +15,14 @@ struct DownloadButtonView: View {
 	let app: ASRepository.App
 	@ObservedObject private var downloadManager = DownloadManager.shared
 
-	@State private var downloadProgress: Double = 0
-	@State private var cancellable: AnyCancellable?
 	@State private var showInstallChoices = false
 
 	var body: some View {
 		ZStack {
 			if let currentDownload = _currentDownload() {
-				ZStack {
-					Circle()
-						.trim(from: 0, to: downloadProgress)
-						.stroke(Color.accentColor, style: StrokeStyle(lineWidth: 2.3, lineCap: .round))
-						.rotationEffect(.degrees(-90))
-						.frame(width: 31, height: 31)
-						.animation(.smooth, value: downloadProgress)
-
-					Image(systemName: downloadProgress >= 0.75 ? "archivebox" : "square.fill")
-						.foregroundStyle(.tint)
-						.font(.footnote).bold()
+				SourceDownloadProgress(download: currentDownload) {
+					downloadManager.cancelDownload(currentDownload)
 				}
-				.onTapGesture {
-					if downloadProgress <= 0.75 {
-						downloadManager.cancelDownload(currentDownload)
-					}
-				}
-				.compatTransition()
 			} else {
 				Button {
 					showInstallChoices = true
@@ -72,12 +54,9 @@ struct DownloadButtonView: View {
 		} message: {
 			Text("التثبيت المكرر ينشئ نسخة بمعرّف Bundle مختلف حتى يمكن تثبيتها بجانب النسخة الأصلية.")
 		}
-		.onAppear(perform: setupObserver)
-		.onDisappear { cancellable?.cancel() }
-		.onChange(of: downloadManager.downloads.description) { _ in
-			setupObserver()
-		}
-		.animation(.easeInOut(duration: 0.3), value: _currentDownload() != nil)
+		// The individual Download publishes its own progress, like Ksign.
+		// Avoid converting the whole queue to a String on each UI pass.
+		.animation(.easeInOut(duration: 0.2), value: _currentDownload()?.id)
 	}
 
 	private func _startInstall(duplicate: Bool) {
@@ -99,7 +78,6 @@ struct DownloadButtonView: View {
 			sourceProvenance: _sourceProvenance(),
 			expectedBytes: app.size ?? 0
 		)
-		setupObserver()
 	}
 
 	private static func _randomBundleSuffix() -> String {
@@ -120,26 +98,36 @@ struct DownloadButtonView: View {
 		}
 	}
 
-	private func setupObserver() {
-		cancellable?.cancel()
-		guard let download = _currentDownload() else {
-			downloadProgress = 0
-			return
-		}
-		downloadProgress = download.overallProgress
 
-		let publisher = Publishers.CombineLatest(
-			download.$progress,
-			download.$unpackageProgress
-		)
-
-		cancellable = publisher.sink { _, _ in
-			downloadProgress = download.overallProgress
-		}
-	}
-	
 	private func _sourceProvenance() -> SourceAppProvenance? {
 		guard let source else { return nil }
 		return SourceAppProvenance(sourceURL: sourceURL, repository: source, app: app)
+	}
+}
+
+private struct SourceDownloadProgress: View {
+	@ObservedObject var download: Download
+	let cancel: () -> Void
+
+	private var progress: Double {
+		max(0, min(1, download.overallProgress))
+	}
+
+	var body: some View {
+		ZStack {
+			Circle()
+				.trim(from: 0, to: progress)
+				.stroke(Color.accentColor, style: StrokeStyle(lineWidth: 2.3, lineCap: .round))
+				.rotationEffect(.degrees(-90))
+				.frame(width: 31, height: 31)
+
+			Image(systemName: progress >= 0.75 ? "archivebox" : "square.fill")
+				.foregroundStyle(.tint)
+				.font(.footnote).bold()
+		}
+		.contentShape(Rectangle())
+		.onTapGesture {
+			if progress < 0.75 { cancel() }
+		}
 	}
 }
