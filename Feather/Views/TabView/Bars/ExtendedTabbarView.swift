@@ -17,7 +17,8 @@ struct ExtendedTabbarView: View {
 
 	init() {
 		let stored = UserDefaults.standard.string(forKey: "BatSign.defaultTab") ?? TabEnum.today.rawValue
-		__selection = State(initialValue: TabEnum(rawValue: stored) ?? .today)
+		let restored = TabEnum(rawValue: stored) ?? .today
+		__selection = State(initialValue: restored == .sources ? .games : restored)
 	}
 
 	var body: some View {
