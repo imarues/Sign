@@ -173,10 +173,12 @@ extension BSSourcesView {
 		let base: String
 		if let count {
 			base = count == 1 ? "1 app" : "\(count) apps"
-		} else if !_viewModel.isFinished {
+		} else if _viewModel.isFetching(source) {
 			return "Refreshing…"
+		} else if let error = _viewModel.failure(for: source) {
+			return error
 		} else {
-			return "Couldn't refresh"
+			return "Tap to load source"
 		}
 
 		let suffix = autoOff ? " • Auto-Updates Off" : ""
