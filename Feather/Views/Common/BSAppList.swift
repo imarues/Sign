@@ -290,7 +290,9 @@ struct BSAppList: View {
 
 	var body: some View {
 		LazyVStack(spacing: 0) {
-			ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
+			// Keep stable per-app identity without creating a full numbered
+			// copy of a multi-thousand-item catalogue on every redraw.
+			ForEach(items) { item in
 				if let picking {
 					Button {
 						BSHaptics.tap()
@@ -333,7 +335,7 @@ struct BSAppList: View {
 					}
 				}
 
-				if index < items.count - 1 {
+				if item.id != items.last?.id {
 					// Inset to the row's own leading edge, the way the App Store
 					// runs its separators under the icon rather than past it.
 					Rectangle()
