@@ -77,13 +77,25 @@ private enum BSRepositoryDiskCache {
 		}
 	}
 
-	static func fetch(from url: URL, forceReload: Bool) async -> FetchOutcome {
-		// A large raw.githubusercontent.com feed can be valid but slow. Retry
-		// transient transport errors once; do not spin on bad JSON/404 links.
+	// IPA Strong's feed is over 6 MB. GitHub RAW may drop an in-flight
+	// connection on mobile networks; a second delivery path prevents one
+	// unreliable host from making the whole catalogue appear unavailable.
+	// The saved source URL stays canonical regardless of which host wins.
+	private static let ipaStrongURL = URL(string:
+		"https://raw.githubusercontent.com/sgad73055-code/ipastrong/main/ipastrong.json")!
+	private static let ipaStrongCDN = URL(string:
+		"https://cdn.jsdelivr.net/gh/sgad73055-code/ipastrong@main/ipastrong.json")!
+
+	private static func fetchEndpoint(
+		_ endpoint: URL,
+		cacheKey: URL,
+		forceReload: Bool
+	) async -> FetchOutcome {
 		for attempt in 0..<2 {
+			if Task.isCancelled { return .error("Request cancelled.") }
 			do {
-				var request = URLRequest(url: url)
-				request.timeoutInterval = 55
+				var request = URLRequest(url: endpoint)
+				request.timeoutInterval = 30
 				request.cachePolicy = forceReload
 					? .reloadIgnoringLocalCacheData : .useProtocolCachePolicy
 				request.setValue("application/json, */*", forHTTPHeaderField: "Accept")
@@ -92,28 +104,71 @@ private enum BSRepositoryDiskCache {
 				if let response = response as? HTTPURLResponse,
 				   !(200...299).contains(response.statusCode) {
 					if (response.statusCode == 429 || response.statusCode >= 500), attempt == 0 {
-						try? await Task.sleep(nanoseconds: 850_000_000)
+						try? await Task.sleep(nanoseconds: 600_000_000)
 						continue
 					}
 					return .error("HTTP \(response.statusCode) — check the source URL.")
 				}
 				guard !data.isEmpty else { return .error("The source returned an empty response.") }
+				guard !Task.isCancelled else { return .error("Request cancelled.") }
 				do {
 					let repository = try JSONDecoder().decode(ASRepository.self, from: data)
-					store(data, for: url)
-					return .success(repository)
+					guard !Task.isCancelled else { return .error("Request cancelled.") }
+					let outcome = FetchOutcome.success(repository)
+					store(data, for: cacheKey)
+					return outcome
 				} catch {
 					return .error("Source JSON could not be read: \(error.localizedDescription)")
 				}
 			} catch {
+				if Task.isCancelled { return .error("Request cancelled.") }
 				if attempt == 0 {
-					try? await Task.sleep(nanoseconds: 850_000_000)
+					try? await Task.sleep(nanoseconds: 600_000_000)
 					continue
 				}
 				return .error("Network error: \(error.localizedDescription)")
 			}
 		}
 		return .error("Source could not be refreshed.")
+	}
+
+	static func fetch(from url: URL, forceReload: Bool) async -> FetchOutcome {
+		guard url == ipaStrongURL else {
+			return await fetchEndpoint(url, cacheKey: url, forceReload: forceReload)
+		}
+
+		// Start the canonical source immediately. If it is not quick, try a
+		// CDN independently and accept the first valid, completely decoded
+		// catalogue. Refreshes give the canonical URL a longer head start to
+		// favour newer data over the CDN's branch cache.
+		return await withTaskGroup(of: FetchOutcome.self) { group in
+			group.addTask {
+				await fetchEndpoint(url, cacheKey: url, forceReload: forceReload)
+			}
+			group.addTask {
+				do {
+					try await Task.sleep(
+						nanoseconds: forceReload ? 3_500_000_000 : 900_000_000
+					)
+				} catch {
+					return .error("Request cancelled.")
+				}
+				guard !Task.isCancelled else { return .error("Request cancelled.") }
+				return await fetchEndpoint(ipaStrongCDN, cacheKey: url, forceReload: false)
+			}
+
+			var lastFailure = FetchOutcome.error("Source could not be refreshed.")
+			for await outcome in group {
+				if outcome.repository != nil {
+					group.cancelAll()
+					return outcome
+				}
+				if outcome.failure != "Request cancelled." {
+					lastFailure = outcome
+				}
+			}
+			return lastFailure
+		}
 	}
 
 }
@@ -150,10 +205,10 @@ final class SourcesViewModel: ObservableObject {
 	private var _networkTasks: [URL: Task<BSRepositoryDiskCache.FetchOutcome, Never>] = [:]
 	private var _activeFetchCalls = 0
 
-	private func _networkTask(for url: URL) -> Task<BSRepositoryDiskCache.FetchOutcome, Never> {
+	private func _networkTask(for url: URL, forceReload: Bool) -> Task<BSRepositoryDiskCache.FetchOutcome, Never> {
 		if let task = _networkTasks[url] { return task }
 		let task = Task.detached(priority: .userInitiated) {
-			await BSRepositoryDiskCache.fetch(from: url, forceReload: true)
+			await BSRepositoryDiskCache.fetch(from: url, forceReload: forceReload)
 		}
 		_networkTasks[url] = task
 		return task
@@ -211,6 +266,11 @@ final class SourcesViewModel: ObservableObject {
 			return (source, url)
 		}
 		for item in sourcesArray { loadingURLs.insert(item.url) }
+		// Begin the first network requests immediately, without waiting for
+		// potentially expensive on-disk JSON decoding of other sources.
+		for item in sourcesArray.prefix(batchSize) {
+			_ = _networkTask(for: item.url, forceReload: refresh)
+		}
 		defer { for item in sourcesArray { loadingURLs.remove(item.url) } }
 
 		if !refresh {
@@ -239,7 +299,7 @@ final class SourcesViewModel: ObservableObject {
 		for index in stride(from: 0, to: sourcesArray.count, by: batchSize) {
 			let endIndex = min(index + batchSize, sourcesArray.count)
 			let batch = Array(sourcesArray[index..<endIndex])
-			let tasks = batch.map { (source: $0.source, url: $0.url, task: _networkTask(for: $0.url)) }
+			let tasks = batch.map { (source: $0.source, url: $0.url, task: _networkTask(for: $0.url, forceReload: refresh)) }
 
 			await withTaskGroup(of: (URL, BSRepositoryDiskCache.FetchOutcome).self) { group in
 				for item in tasks {
