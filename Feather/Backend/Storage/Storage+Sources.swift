@@ -114,21 +114,44 @@ extension Storage {
 	/// canonical GitHub RAW URL, without adding extra sources or touching the
 	/// primary iKiraPlus source. Keep the existing Core Data object so source
 	/// preferences and update settings survive.
+	/// Keep exactly one IPA Strong entry, with exactly the owner's canonical
+	/// URL. Earlier builds used alternate URLs/identifiers and could leave an
+	/// extra hostname-only row when the canonical entry was already present.
+	/// Never modify or remove the iKiraPlus catalogue or unrelated sources.
 	func normaliseIPAstrongSourceURL() {
 		guard let canonical = URL(string:
-			"https://raw.githubusercontent.com/sgad73055-code/ipastrong/main/ipastrong.json")
-		else { return }
+			"https://raw.githubusercontent.com/sgad73055-code/ipastrong/main/ipastrong.json"
+		) else { return }
 
-		let existing = getSources()
-		guard !existing.contains(where: { $0.sourceURL == canonical }) else { return }
-		guard let target = existing.first(where: { source in
-			let name = (source.name ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-			let path = source.sourceURL?.path.lowercased() ?? ""
-			let sameRepository = path.hasPrefix("/sgad73055-code/ipastrong/")
-			return name == "ipastrong" || sameRepository
-		}) else { return }
+		let matching = getSources().filter { source in
+			let name = (source.name ?? "")
+				.trimmingCharacters(in: .whitespacesAndNewlines)
+				.lowercased()
+			let path = (source.sourceURL?.path ?? "").lowercased()
+			let id = (source.identifier ?? "").lowercased()
+			return source.sourceURL == canonical
+				|| path.contains("/sgad73055-code/ipastrong/")
+				|| name == "ipastrong"
+				|| id == "ipastrong"
+		}
+		guard !matching.isEmpty else { return }
 
-		target.sourceURL = canonical
+		// Prefer the already-canonical row so its settings, identifier and
+		// underlying Core Data identity remain stable across upgrades.
+		let keeper = matching.first(where: { $0.sourceURL == canonical }) ?? matching[0]
+		for duplicate in matching where duplicate.objectID != keeper.objectID {
+			context.delete(duplicate)
+		}
+
+		keeper.sourceURL = canonical
+		keeper.name = "ipastrong"
+		// The original JSON identifier can overlap with a different source.
+		let otherIDs = Set(getSources().filter {
+			$0.objectID != keeper.objectID && !$0.isDeleted
+		}.compactMap(\.identifier))
+		if let identifier = keeper.identifier, otherIDs.contains(identifier) {
+			keeper.identifier = canonical.absoluteString
+		}
 		_ = saveContext()
 	}
 
