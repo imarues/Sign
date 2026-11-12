@@ -755,11 +755,15 @@ struct BSGetPill: View {
 	/// Nil-safe relays of the download's own progress publishers, so the ring
 	/// re-renders when a byte arrives rather than only when the queue moves.
 	private var _fileProgressValues: AnyPublisher<Double, Never> {
-		download?.$progress.eraseToAnyPublisher() ?? Empty<Double, Never>().eraseToAnyPublisher()
+		(download?.$progress.eraseToAnyPublisher() ?? Empty<Double, Never>().eraseToAnyPublisher())
+			.throttle(for: .milliseconds(120), scheduler: RunLoop.main, latest: true)
+			.eraseToAnyPublisher()
 	}
 
 	private var _unpackageValues: AnyPublisher<Double, Never> {
-		download?.$unpackageProgress.eraseToAnyPublisher() ?? Empty<Double, Never>().eraseToAnyPublisher()
+		(download?.$unpackageProgress.eraseToAnyPublisher() ?? Empty<Double, Never>().eraseToAnyPublisher())
+			.throttle(for: .milliseconds(120), scheduler: RunLoop.main, latest: true)
+			.eraseToAnyPublisher()
 	}
 
 	// MARK: Actions
@@ -834,11 +838,22 @@ struct BSGetPill: View {
 	/// progress behind it, is a leftover — and the pill must not sit in a ring
 	/// for ever because a transfer was refused or a job died.
 	private func _watchInstall() async {
-		guard jobInFlight || newestSigned != nil else {
-			installFraction = nil
+		guard let identifier = app.id else { return }
+		guard jobInFlight else {
+			// Do not poll SpringBoard 2-3 times per second for every signed
+			// catalogue row. A single snapshot is enough for an idle row.
+			// Only an actual queued/signing job warrants a continuous watch.
+			if newestSigned != nil {
+				let installed = await Task.detached(priority: .utility) {
+					UIApplication.isInstalled(identifier)
+				}.value
+				guard !Task.isCancelled else { return }
+				installFraction = installed ? 1 : nil
+			} else {
+				installFraction = nil
+			}
 			return
 		}
-		guard let identifier = app.id else { return }
 
 		let deadline = Date().addingTimeInterval(240)
 		/// Long enough to outlast a slow package, short enough that a dead
