@@ -150,6 +150,9 @@ struct FeatherApp: App {
 				// starts with a tap — so these hand it the job instead.
 				_applyTestHooks()
 				#endif
+				// Migrate an existing IPA Strong entry to its canonical source URL
+				// before any automatic refresh starts. This leaves iKiraPlus untouched.
+				storage.normaliseIPAstrongSourceURL()
 				autoUpdateManager.start()
 
 				if _biometricLock {
