@@ -52,7 +52,7 @@ enum TabEnum: String, CaseIterable, Hashable {
 		case .apps: BSAppsView(title: "التطبيقات", scope: .applications)
 		case .library: LibraryView()
 		case .updates: UpdatesView()
-		case .search: BSAppsView(title: "Search")
+		case .search: BSAppsView(title: "Search", scope: .all)
 		}
 	}
 
