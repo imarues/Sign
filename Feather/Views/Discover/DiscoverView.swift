@@ -21,6 +21,7 @@ struct DiscoverView: View {
 	@State private var _isAddingPresenting = false
 	@State private var _isSettingsPresenting = false
 	@State private var _isUpdatesPresenting = false
+	@State private var _isSourcesPresenting = false
 	#if DEBUG
 	@State private var _debugPage: BSDebugPage?
 	#endif
@@ -85,6 +86,9 @@ struct DiscoverView: View {
 				}
 				.sheet(isPresented: $_isSettingsPresenting) {
 					SettingsView()
+				}
+				.sheet(isPresented: $_isSourcesPresenting) {
+					BSSourcesView(presentedFromToday: true)
 				}
 				.sheet(isPresented: $_isUpdatesPresenting) {
 					NavigationStack {
@@ -195,6 +199,9 @@ extension DiscoverView {
 			}
 			BSCornerButton(glyph: .gear, label: "Settings", standalone: true) {
 				_isSettingsPresenting = true
+			}
+			BSCornerButton(glyph: .folder, label: "المصادر", standalone: true) {
+				_isSourcesPresenting = true
 			}
 		}
 	}
