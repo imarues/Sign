@@ -81,7 +81,10 @@ struct FeatherApp: App {
 			// one, the iOS 27 blue otherwise. One colour, so the storefront's GET
 			// and the app's own buttons can never drift apart.
 			.tint(BS.accent)
-			.animation(.smooth, value: downloadManager.manualDownloads.description)
+			// Animate only queue membership. Stringifying every Download on
+			// each byte tick invalidates the entire tab hierarchy and makes
+			// scrolling stutter while a large IPA is downloading.
+			.animation(.smooth, value: downloadManager.manualDownloads.map(\.id))
 			.onReceive(NotificationCenter.default.publisher(for: .heartbeatInvalidHost)) { _ in
 				DispatchQueue.main.async {
 					UIAlertController.showAlertWithOk(
