@@ -24,70 +24,51 @@ enum SourceInstallIntent {
 		identifier: String?
 	) -> Bool {
 		guard let transferID else { return false }
-
-		if transferID.hasPrefix(directPrefix) {
-			let accepted = AutoSignManager.shared.enqueueImported(
-				uuid: uuid,
-				reason: .autoSign,
-				force: true
-			)
-			if !accepted {
-				_refuse(
-					name: name,
-					cardID: cardID,
-					message: "The app was downloaded but could not be queued for direct installation."
-				)
-			}
-			return true
-		}
-
-		guard transferID.hasPrefix(duplicatePrefix) else { return false }
-		guard let suffix = _duplicateSuffix(from: transferID) else {
-			_refuse(
-				name: name,
-				cardID: cardID,
-				message: "The duplicate install identifier could not be created."
-			)
-			return true
-		}
+		let duplicate = transferID.hasPrefix(duplicatePrefix)
+		guard duplicate || transferID.hasPrefix(directPrefix) else { return false }
 
 		let request: NSFetchRequest<Imported> = Imported.fetchRequest()
 		request.predicate = NSPredicate(format: "uuid == %@", uuid)
 		guard let imported = (try? Storage.shared.context.fetch(request))?.first else {
-			_refuse(
-				name: name,
-				cardID: cardID,
-				message: "The downloaded app could not be found in the Library for duplicate installation."
-			)
+			_refuse(name: name, cardID: cardID,
+			        message: "The downloaded IPA could not be found for signing.")
+			return true
+		}
+		guard let baseIdentifier = imported.identifier ?? identifier,
+		      !baseIdentifier.isEmpty else {
+			_refuse(name: name, cardID: cardID,
+			        message: "The downloaded IPA has no valid bundle identifier.")
 			return true
 		}
 
-		guard let baseIdentifier = imported.identifier ?? identifier, !baseIdentifier.isEmpty else {
-			_refuse(
-				name: name,
-				cardID: cardID,
-				message: "The app has no bundle identifier to duplicate."
-			)
-			return true
-		}
-
+		// Ksign's direct/duplicate choices do not inherit a bundle override
+		// or a custom display version from a previous manual signing session.
+		// The source owns this choice, and signing then installs automatically.
 		var options = OptionsManager.shared.options
-		options.appIdentifier = "\(baseIdentifier)\(suffix)"
+		options.appName = nil
+		options.appVersion = nil
 		options.signingOption = .default
 		options.post_installAppAfterSigned = true
+		if duplicate {
+			guard let suffix = _duplicateSuffix(from: transferID) else {
+				_refuse(name: name, cardID: cardID,
+				        message: "Could not generate a duplicate bundle identifier.")
+				return true
+			}
+			options.appIdentifier = baseIdentifier + suffix
+		} else {
+			options.appIdentifier = nil
+		}
 
-		let accepted = AutoSignManager.shared.enqueue(
+		let queued = AutoSignManager.shared.enqueue(
 			app: imported,
 			reason: .autoSign,
 			options: options,
 			force: true
 		)
-		if !accepted {
-			_refuse(
-				name: name,
-				cardID: cardID,
-				message: "The duplicate copy could not be queued for signing."
-			)
+		if !queued {
+			_refuse(name: name, cardID: cardID,
+			        message: "The app was imported but couldn't be queued for signing.")
 		}
 		return true
 	}
