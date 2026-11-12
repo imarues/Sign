@@ -1,0 +1,90 @@
+name: Mirror IPA Strong in 250-app batches
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - scripts/build_ipastrong_chunks.py
+      - .github/workflows/ipastrong-chunks.yml
+  workflow_dispatch:
+  schedule:
+    - cron: "17 */2 * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ipastrong-batch-mirror
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Read canonical source and prepare 250-app chunks
+        env:
+          CATALOG_OUTPUT: ${{ runner.temp }}/new-ipastrong
+        run: python3 scripts/build_ipastrong_chunks.py
+
+      - name: Publish to dedicated catalog-cache branch (not main)
+        shell: bash
+        env:
+          OUT: ${{ runner.temp }}/new-ipastrong
+          WORK: ${{ runner.temp }}/catalog-worktree
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git fetch origin catalog-cache:refs/remotes/origin/catalog-cache --depth=1; then
+            git worktree add -B catalog-cache "$WORK" refs/remotes/origin/catalog-cache
+          else
+            git worktree add --detach "$WORK" HEAD
+            (
+              cd "$WORK"
+              git checkout --orphan catalog-cache
+              git rm -rfq . || true
+            )
+          fi
+          python3 - <<'PY'
+          import json, os, pathlib, shutil
+          root = pathlib.Path(os.environ["WORK"]) / "catalog" / "ipastrong"
+          fresh = pathlib.Path(os.environ["OUT"])
+          root.mkdir(parents=True, exist_ok=True)
+          old_manifest = root / "manifest.json"
+          try:
+              old = json.loads(old_manifest.read_text())
+          except (OSError, ValueError):
+              old = {}
+          new = json.loads((fresh / "manifest.json").read_text())
+          # Keep the current version and up to four old versions, because CDN
+          # clients might still hold a previous manifest in their edge cache.
+          history = []
+          for entry in [old.get("contentHash")] + old.get("history", []):
+              if isinstance(entry, str) and entry != new["contentHash"] and entry not in history:
+                  history.append(entry)
+          new["history"] = history[:4]
+          for directory in (fresh / "versions").iterdir():
+              if directory.is_dir():
+                  dest = root / "versions" / directory.name
+                  if not dest.exists():
+                      shutil.copytree(directory, dest)
+          for directory in (root / "versions").iterdir():
+              if directory.is_dir() and directory.name not in {new["contentHash"], *new["history"]}:
+                  shutil.rmtree(directory)
+          (root / "manifest.json").write_text(
+              json.dumps(new, ensure_ascii=False, separators=(",", ":"))
+          )
+          PY
+          cd "$WORK"
+          git add -A catalog/ipastrong
+          if git diff --cached --quiet; then
+            echo "Canonical source has not changed; no mirror commit needed."
+            exit 0
+          fi
+          git commit -m "Update IPA Strong 250-app batch mirror"
+          git push origin HEAD:catalog-cache
