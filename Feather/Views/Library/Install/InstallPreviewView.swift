@@ -181,15 +181,8 @@ struct InstallPreviewView: View {
 			return
 		}
 
-		// The local server is the route this method installs through; if it never
-		// came up, saying so is the whole difference between a sheet that sits at
-		// 0% for ever and one the user can act on.
-		if _installationMethod == 0, !installer.isAvailable, let startupError = installer.startupError {
-			_showInstallError(
-				.localized("The local install server could not start: %@", arguments: startupError.localizedDescription)
-			)
-			return
-		}
+		// Listener startup is asynchronous; waitForPackage now checks actual
+		// readiness and retries a failed bind. Do not reject while it is pending.
 				
 		installTask = Task.detached(priority: .userInitiated) {
 			do {
