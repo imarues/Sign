@@ -58,8 +58,8 @@ extension SettingsView {
 		Section {
 			Picker(selection: $_defaultTabRaw) {
 				Text(.localized("Today")).tag(TabEnum.today.rawValue)
-				Text(.localized("Sources")).tag(TabEnum.sources.rawValue)
-				Text(.localized("Apps")).tag(TabEnum.apps.rawValue)
+				Text("الألعاب").tag(TabEnum.games.rawValue)
+				Text("التطبيقات").tag(TabEnum.apps.rawValue)
 				Text(.localized("Library")).tag(TabEnum.library.rawValue)
 			} label: {
 				BSRowLabel(glyph: .launch, title: "Launch Tab")
