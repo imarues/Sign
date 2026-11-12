@@ -259,7 +259,10 @@ struct BSAppsView: View {
 		let sources = Array(_sources)
 
 		if sources.contains(where: { _viewModel.sources[$0] == nil }) {
-			await _viewModel.fetchSources(_sources)
+			// Like Ksign, show whichever catalogue is already available. Don't
+			// hold the entire Apps/Search screen behind a slow second source.
+			// Each feed's arrival increments revision and rebuilds this index.
+			Task { await _viewModel.fetchSources(sources) }
 		}
 
 		let key = _indexKey
