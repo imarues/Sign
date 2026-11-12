@@ -8,7 +8,10 @@
 import SwiftUI
 
 struct TabbarView: View {
-	@State private var selectedTab: TabEnum = TabEnum(rawValue: UserDefaults.standard.string(forKey: "BatSign.defaultTab") ?? "") ?? .today
+	@State private var selectedTab: TabEnum = {
+		let restored = TabEnum(rawValue: UserDefaults.standard.string(forKey: "BatSign.defaultTab") ?? "") ?? .today
+		return restored == .sources ? .games : restored
+	}()
 
 	init() {
 		// Below iOS 26 the bar is drawn by UIKit appearances, so the iOS 27
