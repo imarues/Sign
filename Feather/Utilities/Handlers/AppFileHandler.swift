@@ -75,7 +75,17 @@ final class AppFileHandler: NSObject, @unchecked Sendable {
 				} catch let error as ImportedFileHandlerError {
 					continuation.resume(throwing: error)
 				} catch {
-					continuation.resume(throwing: ImportedFileHandlerError.unreadablePackage(self._ipa.lastPathComponent))
+					// A large game's unzip can fail because disk space ran out.
+					// That is not a corrupt IPA and must not be reported as one.
+					let nsError = error as NSError
+					let underlying = nsError.userInfo[NSUnderlyingErrorKey] as? NSError
+					let diskFull = [nsError, underlying].compactMap { $0 }.contains {
+						($0.domain == NSCocoaErrorDomain && $0.code == 640) ||
+						($0.domain == NSPOSIXErrorDomain && $0.code == 28)
+					}
+					continuation.resume(throwing: diskFull
+						? ImportedFileHandlerError.insufficientStorage
+						: ImportedFileHandlerError.unreadablePackage(self._ipa.lastPathComponent))
 				}
 			}
 		}
@@ -440,6 +450,7 @@ private enum ImportedFileHandlerError: Error, LocalizedError {
 	case appNotFound
 	case unsafeArchiveEntry(String)
 	case unreadablePackage(String)
+	case insufficientStorage
 
 	var errorDescription: String? {
 		switch self {
@@ -450,7 +461,9 @@ private enum ImportedFileHandlerError: Error, LocalizedError {
 		case .unsafeArchiveEntry(let entry):
 			"The package tries to write outside its own folder (\(entry)), so it was refused."
 		case .unreadablePackage(let name):
-			"‘\(name)’ could not be opened — the file is not a valid app package."
+			"‘\(name)’ could not be opened — the IPA may be incomplete, damaged, or unsupported."
+		case .insufficientStorage:
+			"Not enough free storage to unpack this IPA. Free up space and try again."
 		}
 	}
 }
