@@ -36,6 +36,16 @@ public struct ASRepository: Sendable, Decodable, Hashable, Identifiable {
 	public var featuredApps: [App.ID]?
 	public var news: [News]?
 
+	/// One malformed app in a large community source must not hide every
+	/// other app. Decode entries individually; leave the source invalid only
+	/// when none of its records are usable.
+	private struct RecoverableApp: Decodable {
+		let app: App?
+		init(from decoder: any Decoder) throws {
+			app = try? App(from: decoder)
+		}
+	}
+
 	public init(from decoder: any Decoder) throws {
 		let container = try decoder.container(keyedBy: CodingKeys.self)
 		self.id = try container.decodeIfPresent(String.self, forKey: .id)
@@ -79,7 +89,9 @@ public struct ASRepository: Sendable, Decodable, Hashable, Identifiable {
 			forKey: .userInfo
 		)
 
-		let decodedApps = try container.decodeIfPresent([App].self, forKey: .apps)
+		let decodedApps = try container.decodeIfPresent(
+			[RecoverableApp].self, forKey: .apps
+		)?.compactMap(\.app)
 		guard
 			let apps = decodedApps,
 			!apps.isEmpty
@@ -353,7 +365,7 @@ extension ASRepository {
 					forKey: .localizedDescription
 				)
 
-			self.iconURL = try container.decode(URL.self, forKey: .iconURL)
+			self.iconURL = try? container.decodeIfPresent(URL.self, forKey: .iconURL)
 
 			self.tintColor =
 				try container.decodeIfPresent(Color.self, forKey: .tintColor)
