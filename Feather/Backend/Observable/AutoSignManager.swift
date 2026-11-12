@@ -1102,9 +1102,18 @@ final class AutoSignManager: ObservableObject {
 		}
 
 		let handler = ArchiveHandler(app: app, viewModel: viewModel)
-		try await handler.move()
-		let packageUrl = try await handler.archive()
-		installer.packageUrl = packageUrl
+		do {
+			try await handler.move()
+			let packageUrl = try await handler.archive()
+			// Auto-installs share the same fixed /app.ipa endpoint as manual
+			// installs. Wait for its current transfer rather than failing with
+			// error 48 or overwriting the previous app's payload.
+			try await installer.waitForPackage(packageUrl)
+		} catch {
+			installer.stop()
+			handler.clean()
+			throw error
+		}
 		Self._retainInstaller(installer)
 		Self._liveArchiveHandlers[ObjectIdentifier(installer)] = handler
 
