@@ -1295,7 +1295,8 @@ extension DownloadManager: URLSessionDownloadDelegate {
 		(task.response as? HTTPURLResponse)?.statusCode
 	}
 
-	/// Whether the file on disk begins with the bytes of a zip archive.
+	/// Whether the downloaded ZIP has both its signature and a readable
+	/// central directory with an installable .app in Payload.
 	///
 	/// Every installable package — an ipa, a tipa — is a zip. A server that
 	/// answers 200 with an error page, a login wall, or a truncated file
@@ -1307,7 +1308,8 @@ extension DownloadManager: URLSessionDownloadDelegate {
 		guard let handle = try? FileHandle(forReadingFrom: url) else { return false }
 		defer { try? handle.close() }
 		guard let magic = try? handle.read(upToCount: 2), magic.count == 2 else { return false }
-		return magic == Data([0x50, 0x4B]) // "PK"
+		guard magic == Data([0x50, 0x4B]) else { return false }
+		return AppFileHandler.isReadablePackage(at: url)
 	}
 
 	/// What the user reads when the system takes a finished download back.
@@ -1551,19 +1553,13 @@ extension DownloadManager: URLSessionDownloadDelegate {
 			// unzip later as the zip error the user reported; caught here, they
 			// are told for what they are instead.
 			guard Self._hasZipSignature(at: destinationURL) else {
-				Self.log.error("download: the delivered file is not a zip archive — \(destinationURL.lastPathComponent, privacy: .public)")
-				// The junk bytes were already moved into staging, and the journal
-				// never pointed at them (staging happens a few lines below), so
-				// the failure paths' keyed clear cannot see this file. It is
-				// removed here: an error page must not sit in staging for ever,
-				// and its name is the one a future legitimate download would
-				// have been given.
+				Self.log.error("download: the delivered IPA is incomplete or has no readable Payload — \(destinationURL.lastPathComponent, privacy: .public)")
 				try? FileManager.default.removeItem(at: destinationURL)
-				let reason = "The file the server sent is not an app package."
+				// Some mirrors finish an HTTP 200 response before the IPA's ZIP
+				// directory has arrived. Retry once from the original URL, into
+				// our own file, rather than immediately failing the install.
 				DispatchQueue.main.async { [weak self] in
-					guard let self else { return }
-					self._fail(download, reason: reason)
-					self._drop(download)
+					self?._beginRescue(for: download, suggestedFileName: suggestedFileName)
 				}
 				return
 			}
@@ -1684,7 +1680,7 @@ extension DownloadManager: URLSessionDownloadDelegate {
 				BSJobJournal.shared.clearIf(transferID: pending.transferID)
 				let name = pending.name ?? Self.displayName(for: URL(string: pending.url) ?? keep)
 				let identifier = pending.bundleID ?? pending.transferID
-				let reason = "The file the server sent is not an app package."
+				let reason = "The downloaded IPA is incomplete or invalid. Check the source link and try again."
 				DispatchQueue.main.async {
 					LiveStatus.finish(success: false, appName: name, detail: reason, appID: identifier)
 					AutoSignManager.shared.announceDownloadFailed(name: name, identifier: identifier, message: reason)
