@@ -79,9 +79,14 @@ final class AppFileHandler: NSObject, @unchecked Sendable {
 					// That is not a corrupt IPA and must not be reported as one.
 					let nsError = error as NSError
 					let underlying = nsError.userInfo[NSUnderlyingErrorKey] as? NSError
-					let diskFull = [nsError, underlying].compactMap { $0 }.contains {
-						($0.domain == NSCocoaErrorDomain && $0.code == 640) ||
-						($0.domain == NSPOSIXErrorDomain && $0.code == 28)
+					func isDiskFull(_ candidate: NSError) -> Bool {
+						if candidate.domain == NSCocoaErrorDomain && candidate.code == 640 { return true }
+						if candidate.domain == NSPOSIXErrorDomain && candidate.code == 28 { return true }
+						return false
+					}
+					var diskFull = isDiskFull(nsError)
+					if let underlying {
+						diskFull = diskFull || isDiskFull(underlying)
 					}
 					continuation.resume(throwing: diskFull
 						? ImportedFileHandlerError.insufficientStorage
