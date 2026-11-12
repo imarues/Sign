@@ -187,7 +187,14 @@ struct InstallPreviewView: View {
 					if await _installationMethod == 0 {
 						await MainActor.run {
 							installer.packageUrl = packageUrl
-							viewModel.status = .ready
+							if let error = installer.startupError {
+								// Do not open the OTA URL when another install owns
+								// the fixed loopback endpoint.
+								archive?.clean()
+								viewModel.status = .broken(error)
+							} else {
+								viewModel.status = .ready
+							}
 						}
 						
 						if case .installing = await viewModel.status,
