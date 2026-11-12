@@ -268,7 +268,8 @@ private final class GBoxLoopbackServer {
 		}
 
 		let parameters = NWParameters.tcp
-		parameters.allowLocalEndpointReuse = true
+		// The local OTA port serves one IPA; never share it with another signer.
+		parameters.allowLocalEndpointReuse = false
 		parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(loopback), port: endpointPort)
 
 		// The port is already fixed by requiredLocalEndpoint. Passing the same
