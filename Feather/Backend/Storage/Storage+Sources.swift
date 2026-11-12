@@ -110,6 +110,28 @@ extension Storage {
 		completion(nil)
 	}
 
+	/// Normalise the already-added IPA Strong catalogue to its official
+	/// canonical GitHub RAW URL, without adding extra sources or touching the
+	/// primary iKiraPlus source. Keep the existing Core Data object so source
+	/// preferences and update settings survive.
+	func normaliseIPAstrongSourceURL() {
+		guard let canonical = URL(string:
+			"https://raw.githubusercontent.com/sgad73055-code/ipastrong/main/ipastrong.json")
+		else { return }
+
+		let existing = getSources()
+		guard !existing.contains(where: { $0.sourceURL == canonical }) else { return }
+		guard let target = existing.first(where: { source in
+			let name = (source.name ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+			let path = source.sourceURL?.path.lowercased() ?? ""
+			let sameRepository = path.hasPrefix("/sgad73055-code/ipastrong/")
+			return name == "ipastrong" || sameRepository
+		}) else { return }
+
+		target.sourceURL = canonical
+		_ = saveContext()
+	}
+
 	func deleteSource(for source: AltSource) {
 		context.delete(source)
 		saveContext()
