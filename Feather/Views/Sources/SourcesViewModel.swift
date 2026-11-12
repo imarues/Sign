@@ -61,25 +61,57 @@ private enum BSRepositoryDiskCache {
 		}
 	}
 
-	static func fetch(from url: URL, forceReload: Bool) async -> ASRepository? {
-		do {
-			var request = URLRequest(url: url)
-			request.timeoutInterval = 35
-			request.cachePolicy = forceReload ? .reloadIgnoringLocalCacheData : .useProtocolCachePolicy
+	struct FetchOutcome: Sendable {
+		let repository: ASRepository?
+		let failure: String?
 
-			let (data, response) = try await URLSession.shared.data(for: request)
-			if let response = response as? HTTPURLResponse,
-			   !(200...299).contains(response.statusCode) {
-				return nil
-			}
-
-			let repository = try JSONDecoder().decode(ASRepository.self, from: data)
-			store(data, for: url)
-			return repository
-		} catch {
-			return nil
+		static func success(_ repository: ASRepository) -> Self {
+			.init(repository: repository, failure: nil)
+		}
+		static func error(_ message: String) -> Self {
+			.init(repository: nil, failure: message)
 		}
 	}
+
+	static func fetch(from url: URL, forceReload: Bool) async -> FetchOutcome {
+		// A large raw.githubusercontent.com feed can be valid but slow. Retry
+		// transient transport errors once; do not spin on bad JSON/404 links.
+		for attempt in 0..<2 {
+			do {
+				var request = URLRequest(url: url)
+				request.timeoutInterval = 55
+				request.cachePolicy = forceReload
+					? .reloadIgnoringLocalCacheData : .useProtocolCachePolicy
+				request.setValue("application/json, */*", forHTTPHeaderField: "Accept")
+
+				let (data, response) = try await URLSession.shared.data(for: request)
+				if let response = response as? HTTPURLResponse,
+				   !(200...299).contains(response.statusCode) {
+					if (response.statusCode == 429 || response.statusCode >= 500), attempt == 0 {
+						try? await Task.sleep(nanoseconds: 850_000_000)
+						continue
+					}
+					return .error("HTTP \(response.statusCode) — check the source URL.")
+				}
+				guard !data.isEmpty else { return .error("The source returned an empty response.") }
+				do {
+					let repository = try JSONDecoder().decode(ASRepository.self, from: data)
+					store(data, for: url)
+					return .success(repository)
+				} catch {
+					return .error("Source JSON could not be read: \(error.localizedDescription)")
+				}
+			} catch {
+				if attempt == 0 {
+					try? await Task.sleep(nanoseconds: 850_000_000)
+					continue
+				}
+				return .error("Network error: \(error.localizedDescription)")
+			}
+		}
+		return .error("Source could not be refreshed.")
+	}
+
 }
 
 // MARK: - Class
@@ -94,14 +126,26 @@ final class SourcesViewModel: ObservableObject {
 	@Published private(set) var isFinished = true
 	@Published private(set) var revision = 0
 	@Published var sources: [AltSource: ASRepository] = [:]
+	@Published private(set) var sourceFailures: [URL: String] = [:]
+	@Published private(set) var loadingURLs: Set<URL> = []
+
+	func failure(for source: AltSource) -> String? {
+		guard let url = source.sourceURL else { return "Missing source URL." }
+		return sourceFailures[url]
+	}
+
+	func isFetching(_ source: AltSource) -> Bool {
+		guard let url = source.sourceURL else { return false }
+		return loadingURLs.contains(url)
+	}
 
 	/// Different tabs and newly added sources may request their feeds together.
 	/// Deduplicate the actual network request by URL, not by a single global
 	/// fetch that delays every new source behind one slow catalogue.
-	private var _networkTasks: [URL: Task<ASRepository?, Never>] = [:]
+	private var _networkTasks: [URL: Task<BSRepositoryDiskCache.FetchOutcome, Never>] = [:]
 	private var _activeFetchCalls = 0
 
-	private func _networkTask(for url: URL) -> Task<ASRepository?, Never> {
+	private func _networkTask(for url: URL) -> Task<BSRepositoryDiskCache.FetchOutcome, Never> {
 		if let task = _networkTasks[url] { return task }
 		let task = Task.detached(priority: .userInitiated) {
 			await BSRepositoryDiskCache.fetch(from: url, forceReload: true)
@@ -112,6 +156,7 @@ final class SourcesViewModel: ObservableObject {
 
 	private func _apply(_ repository: ASRepository, to source: AltSource) {
 		sources[source] = repository
+		if let url = source.sourceURL { sourceFailures[url] = nil }
 		revision &+= 1
 		// A source is visible immediately after saving its URL. Replace the
 		// temporary hostname and icon as soon as its first fetch succeeds.
@@ -157,6 +202,8 @@ final class SourcesViewModel: ObservableObject {
 			guard let url = source.sourceURL else { return nil }
 			return (source, url)
 		}
+		for item in sourcesArray { loadingURLs.insert(item.url) }
+		defer { for item in sourcesArray { loadingURLs.remove(item.url) } }
 
 		if !refresh {
 			// Use the disk copy without waiting for *all* cache reads.
@@ -183,17 +230,20 @@ final class SourcesViewModel: ObservableObject {
 			let batch = Array(sourcesArray[index..<endIndex])
 			let tasks = batch.map { (source: $0.source, url: $0.url, task: _networkTask(for: $0.url)) }
 
-			await withTaskGroup(of: (URL, ASRepository?).self) { group in
+			await withTaskGroup(of: (URL, BSRepositoryDiskCache.FetchOutcome).self) { group in
 				for item in tasks {
 					group.addTask { (item.url, await item.task.value) }
 				}
-				for await (url, repository) in group {
-					if let repository {
+				for await (url, outcome) in group {
+					if let repository = outcome.repository {
 						for pair in batch where pair.url == url {
 							self._apply(repository, to: pair.source)
 						}
+					} else {
+						sourceFailures[url] = outcome.failure ?? "Source refresh failed."
 					}
-					// A failed refresh keeps its previously cached catalogue.
+					loadingURLs.remove(url)
+					// A failed refresh keeps the last successfully cached catalogue.
 					_networkTasks[url] = nil
 				}
 			}
