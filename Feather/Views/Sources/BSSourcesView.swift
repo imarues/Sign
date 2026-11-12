@@ -167,7 +167,9 @@ extension BSSourcesView {
 	}
 
 	private func _caption(_ source: AltSource) -> String {
-		let count = _viewModel.sources[source]?.apps.count
+		// A raw feed may contain many historical/duplicate records. Count
+		// the app identities actually shown in this source's Apps list.
+		let count = source.sourceURL.flatMap { _viewModel.distinctAppCounts[$0] }
 		let autoOff = !(_autoSourceOverrides[source.identifier ?? ""] ?? true)
 
 		let base: String
