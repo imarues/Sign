@@ -26,11 +26,14 @@ class ServerInstaller: Identifiable, ObservableObject {
 	// https://i.gbox.run/install.plist. Keep the same fixed port.
 	let port = 9800
 	private var _needsShutdown = false
+	private var _allowExplicitSameAppRetry = false
 
 	var packageUrl: URL? {
 		didSet {
 			guard getServerMethod() == 0, let packageUrl, let server = _gboxServer else { return }
 			if server.claim(packageURL: packageUrl, owner: id,
+			                bundleIdentifier: app.identifier,
+			                replaceUnstartedSameApp: _allowExplicitSameAppRetry,
 			                onServing: { [weak self] in self?._updateStatus(.sendingPayload) },
 			                onFullTransfer: { [weak self] in
 					self?._updateStatus(.installing)
@@ -47,7 +50,8 @@ class ServerInstaller: Identifiable, ObservableObject {
 						"Another install is using the local server. Finish or cancel that install, then try again."]
 				)
 				startupError = error
-				_updateStatus(.broken(error))
+				// The caller waits for an existing install to finish, or explicitly
+				// retries the same app. Do not prematurely break the install sheet.
 			}
 		}
 	}
@@ -117,7 +121,11 @@ class ServerInstaller: Identifiable, ObservableObject {
 	}
 
 	@MainActor
-	func waitForPackage(_ url: URL, timeout: TimeInterval = 24) async throws {
+	func waitForPackage(
+		_ url: URL,
+		timeout: TimeInterval = 24,
+		retryCancelledSameApp: Bool = false
+	) async throws {
 		guard getServerMethod() == 0 else {
 			packageUrl = url
 			if let startupError { throw startupError }
@@ -134,8 +142,12 @@ class ServerInstaller: Identifiable, ObservableObject {
 				do { try _attachLoopback() } catch { lastError = error }
 			}
 			if let server = _gboxServer, server.isReady {
-				if !server.isClaimed(byOtherThan: id) {
+				if !server.isClaimed(byOtherThan: id) || retryCancelledSameApp {
+					// Only an explicit Library retry can replace an earlier pending
+					// request for this *same* bundle, and only before any IPA fetch.
+					_allowExplicitSameAppRetry = retryCancelledSameApp
 					packageUrl = url
+					_allowExplicitSameAppRetry = false
 					if startupError == nil { return }
 					lastError = startupError
 				}
@@ -258,6 +270,8 @@ private final class GBoxLoopbackServer {
 	private let packageLock = NSLock()
 	private var _packageURL: URL?
 	private var claimedBy: UUID?
+	private var claimedBundleIdentifier: String?
+	private var activeGetRequests = 0
 	private var _listenerFailure: Error?
 	private var _ready = false
 	private var stopped = false
@@ -289,14 +303,21 @@ private final class GBoxLoopbackServer {
 	/// Only one package can be exposed as /app.ipa at a time; a second
 	/// install must not silently replace an IPA that installd is fetching.
 	func claim(packageURL: URL, owner: UUID,
+	           bundleIdentifier: String?,
+	           replaceUnstartedSameApp: Bool = false,
 	           onServing: @escaping () -> Void,
 	           onFullTransfer: @escaping () -> Void,
 	           onError: @escaping (Error) -> Void) -> Bool {
 		packageLock.lock()
 		defer { packageLock.unlock() }
-		guard !stopped, _listenerFailure == nil,
-		      claimedBy == nil || claimedBy == owner else { return false }
+		guard !stopped, _listenerFailure == nil else { return false }
+		let ownedByThisRequest = claimedBy == nil || claimedBy == owner
+		let safeExplicitRetry = replaceUnstartedSameApp &&
+			activeGetRequests == 0 &&
+			bundleIdentifier != nil && claimedBundleIdentifier == bundleIdentifier
+		guard ownedByThisRequest || safeExplicitRetry else { return false }
 		claimedBy = owner
+		claimedBundleIdentifier = bundleIdentifier
 		_packageURL = packageURL
 		self.onServing = onServing
 		self.onFullTransfer = onFullTransfer
@@ -309,10 +330,28 @@ private final class GBoxLoopbackServer {
 		defer { packageLock.unlock() }
 		guard claimedBy == owner else { return }
 		claimedBy = nil
+		claimedBundleIdentifier = nil
 		_packageURL = nil
 		onServing = nil
 		onFullTransfer = nil
 		onError = nil
+	}
+
+	/// Reserve an in-flight GET before the response starts. An explicit retry
+	/// must never replace the bytes of an IPA that iOS is already fetching.
+	func beginRequest(method: String) -> URL? {
+		packageLock.lock()
+		defer { packageLock.unlock() }
+		guard let url = _packageURL else { return nil }
+		if method == "GET" { activeGetRequests += 1 }
+		return url
+	}
+
+	func finishRequest(method: String) {
+		guard method == "GET" else { return }
+		packageLock.lock()
+		activeGetRequests = max(0, activeGetRequests - 1)
+		packageLock.unlock()
 	}
 
 	func isClaimed(byOtherThan owner: UUID) -> Bool {
@@ -444,7 +483,7 @@ private final class GBoxLoopbackServer {
 			return
 		}
 
-		guard let url = packageURL else {
+		guard let url = beginRequest(method: method) else {
 			_sendSimple(connection, status: "503 Service Unavailable")
 			return
 		}
@@ -452,11 +491,13 @@ private final class GBoxLoopbackServer {
 		do {
 			let attrs = try FileManager.default.attributesOfItem(atPath: url.path)
 			guard let sizeNumber = attrs[.size] as? NSNumber else {
+				finishRequest(method: method)
 				_sendSimple(connection, status: "500 Internal Server Error")
 				return
 			}
 			let total = sizeNumber.uint64Value
 			guard total > 0 else {
+				finishRequest(method: method)
 				_sendSimple(connection, status: "404 Not Found")
 				return
 			}
@@ -465,6 +506,7 @@ private final class GBoxLoopbackServer {
 			let start = requestedRange?.lowerBound ?? 0
 			let end = requestedRange?.upperBound ?? (total - 1)
 			guard start <= end, end < total else {
+				finishRequest(method: method)
 				_sendSimple(
 					connection,
 					status: "416 Range Not Satisfiable",
@@ -497,6 +539,7 @@ private final class GBoxLoopbackServer {
 					return
 				}
 				if let error {
+					self.finishRequest(method: method)
 					self.onError?(error)
 					connection.cancel()
 					return
@@ -514,6 +557,7 @@ private final class GBoxLoopbackServer {
 				)
 			})
 		} catch {
+			finishRequest(method: method)
 			onError?(error)
 			_sendSimple(connection, status: "500 Internal Server Error")
 		}
@@ -527,6 +571,7 @@ private final class GBoxLoopbackServer {
 		to connection: NWConnection
 	) {
 		guard let handle = try? FileHandle(forReadingFrom: url) else {
+			finishRequest(method: "GET")
 			_sendSimple(connection, status: "500 Internal Server Error")
 			return
 		}
@@ -546,6 +591,7 @@ private final class GBoxLoopbackServer {
 
 		func pump() {
 			if state.remaining == 0 {
+				self.finishRequest(method: "GET")
 				state.handle.closeFile()
 				connection.cancel()
 				if isWholeFile { self._onFullTransferMain() }
@@ -555,6 +601,7 @@ private final class GBoxLoopbackServer {
 			let count = Int(min(chunkSize, state.remaining))
 			let chunk = state.handle.readData(ofLength: count)
 			if chunk.isEmpty {
+				self.finishRequest(method: "GET")
 				state.handle.closeFile()
 				let error = NSError(
 					domain: "BatSign.GBoxLoopback",
@@ -569,6 +616,7 @@ private final class GBoxLoopbackServer {
 			state.remaining -= UInt64(chunk.count)
 			connection.send(content: chunk, completion: .contentProcessed { error in
 				if let error {
+					self.finishRequest(method: "GET")
 					state.handle.closeFile()
 					self.onError?(error)
 					connection.cancel()
