@@ -10,6 +10,9 @@ import CoreData
 import NimbleViews
 
 struct UpdatesView: View {
+	@Environment(\.scenePhase) private var scenePhase
+	@State private var installedBundleIDs: Set<String> = []
+	@State private var presentingRecentInstall: Signed?
 	@StateObject private var autoUpdateManager = AutoUpdateManager.shared
 	@ObservedObject private var updateManager = UpdateManager.shared
 	@ObservedObject private var downloadManager = DownloadManager.shared
@@ -86,6 +89,18 @@ struct UpdatesView: View {
 			.navigationBarTitleDisplayMode(.large)
 			.refreshable {
 				await autoUpdateManager.checkNow(notifyWhenClean: false)
+				await _refreshInstalledApps()
+			}
+			.sheet(item: $presentingRecentInstall) { app in
+				InstallPreviewView(app: app)
+			}
+			.task(id: _recentlyUpdated.map(\.uuid)) {
+				await _refreshInstalledApps()
+			}
+			.onChange(of: scenePhase) { phase in
+				if phase == .active {
+					Task { await _refreshInstalledApps() }
+				}
 			}
 		}
 	}
@@ -286,7 +301,7 @@ struct UpdatesView: View {
 	@ViewBuilder
 	private func _recentSection() -> some View {
 		VStack(alignment: .leading, spacing: WSSpacing.md) {
-			WSSectionHeader(title: "Recently Updated")
+			WSSectionHeader(title: "Recently Signed")
 
 			VStack(spacing: WSSpacing.sm + 2) {
 				ForEach(_recentlyUpdated, id: \.uuid) { app in
@@ -309,8 +324,19 @@ struct UpdatesView: View {
 
 						Spacer()
 
-						WSActionButton(title: "Open") {
-							UIApplication.openApp(with: app.identifier ?? "")
+						let identifier = app.identifier ?? ""
+						let installed = installedBundleIDs.contains(identifier)
+						WSActionButton(title: installed ? "Open" : "Install") {
+							guard !identifier.isEmpty else { return }
+							if UIApplication.isInstalled(identifier) {
+								UIApplication.openApp(with: identifier)
+							} else {
+								// A signed Library entry does NOT mean the user accepted
+								// Apple's installation prompt. Cancelled installs can be
+								// retried here without downloading/signing again.
+								installedBundleIDs.remove(identifier)
+								presentingRecentInstall = app
+							}
 						}
 					}
 					.padding(WSSpacing.cardPadding)
@@ -368,6 +394,20 @@ struct UpdatesView: View {
 				}
 			}
 		}
+	}
+
+	// MARK: Installed app verification
+
+	private func _refreshInstalledApps() async {
+		// The Recently Updated section is populated by signed Library records.
+		// Query SpringBoard separately so a cancelled OTA confirmation never
+		// presents a dead OPEN button. One off-main snapshot on entry/return.
+		let identifiers = Array(Set(_recentlyUpdated.compactMap(\.identifier)))
+		let available = await Task.detached(priority: .utility) {
+			Set(identifiers.filter { UIApplication.isInstalled($0) })
+		}.value
+		guard !Task.isCancelled else { return }
+		installedBundleIDs = available
 	}
 
 	// MARK: Helpers
