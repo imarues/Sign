@@ -48,23 +48,17 @@ extension ServerInstaller {
 		URL(string: "http://127.0.0.1:9800/app.ipa")!
 	}
 
-	/// Build the same production GBox manifest key, but hand iOS a manifest URL
-	/// on our own Pages domain. The Pages Function proxies the GBox plist bytes
-	/// server-side without redirecting the device, so the visible install origin
-	/// is ikiraplus.pages.dev while the signing and payload flow stay unchanged.
+	/// Use the same HTTPS manifest format and URL-safe Base64 descriptor as
+	/// Ksign. The Pages Function serves the plist while the IPA itself is
+	/// streamed by this app from 127.0.0.1:9800.
 	var gboxManifestEndpoint: URL? {
-		let manifestFile: String
-
-		if let identifier = manifestIdentifier {
-			let descriptor = "\(manifestName)/\(identifier)/\(manifestVersion)"
-			let base64 = Data(descriptor.utf8).base64EncodedString()
-			let gboxEncoded = base64.replacingOccurrences(of: "=", with: "%3D")
-			manifestFile = "\(gboxEncoded).plist"
-		} else {
-			manifestFile = "install.plist"
-		}
-
-		return URL(string: "https://ikiraplus.pages.dev/install/\(manifestFile)")
+		guard let identifier = manifestIdentifier else { return nil }
+		let descriptor = "\(manifestName)/\(identifier)/\(manifestVersion)"
+		let encoded = Data(descriptor.utf8).base64EncodedString()
+			.replacingOccurrences(of: "+", with: "-")
+			.replacingOccurrences(of: "/", with: "_")
+			.replacingOccurrences(of: "=", with: "")
+		return URL(string: "https://ipastore.pages.dev/install/\(encoded).plist")
 	}
 
 	/// Local endpoints are retained as a fallback/debug route.
