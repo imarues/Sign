@@ -999,22 +999,10 @@ final class AutoSignManager: ObservableObject {
 			if method == 1 {
 				try await _installOverPairingTunnel(app)
 			} else {
-				do {
-					try await _serverInstall(app)
-				} catch {
-					// The HTTPS server can fail before handing any URL to iOS. In that
-					// safe window, a valid imported pairing file allows a certificate-
-					// independent installation. Without pairing, surface a useful error.
-					guard FileManager.default.fileExists(atPath: HeartbeatManager.pairingFile()) else {
-						throw NSError(
-							domain: "BatSign.Installation",
-							code: 11,
-							userInfo: [NSLocalizedDescriptionKey: String.localized("The OTA server is unavailable and no pairing file is installed. Import a pairing record and connect LocalDevVPN in Settings → Installation → idevice, or install a replacement trusted server certificate.")]
-						)
-					}
-					try await _installOverPairingTunnel(app)
-					return true
-				}
+				// Ksign-style OTA: never switch this chosen method to pairing/VPN
+				// just because the local HTTP listener is busy. Preserve the actual
+				// NWListener error and let the user retry the signed Library entry.
+				try await _serverInstall(app)
 
 				if let identifier = app.identifier {
 					BSInstallWatcher.shared.follow(identifier, name: app.name ?? "App", expecting: _builtIdentity(of: app))
@@ -1093,13 +1081,9 @@ final class AutoSignManager: ObservableObject {
 	private func _serverInstall(_ app: Signed) async throws {
 		let viewModel = InstallerStatusViewModel(isIdevice: false)
 		let installer = ServerInstaller(app: app, viewModel: viewModel)
-		guard installer.isAvailable else {
-			throw installer.startupError ?? NSError(
-				domain: "BatSign.Installation",
-				code: 10,
-				userInfo: [NSLocalizedDescriptionKey: String.localized("The OTA server could not start. Its HTTPS certificate is unavailable, invalid, or revoked; set up a pairing file and tunnel or install a new trusted certificate.")]
-			)
-		}
+		// The listener binds asynchronously. waitForPackage checks .ready and
+		// retries failed attempts; checking isAvailable here produced false
+		// failures before iOS had even allowed the socket to open.
 
 		let handler = ArchiveHandler(app: app, viewModel: viewModel)
 		do {
