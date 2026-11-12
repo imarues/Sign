@@ -134,8 +134,37 @@ private enum BSAppsSearchEngine {
 	}
 }
 
+/// The same source index backs two independent, exclusive catalog tabs.
+enum BSCatalogScope {
+	case all
+	case applications
+	case games
+
+	/// Classify only by the JSON category field, never by names or text.
+	static func isGame(category: String?) -> Bool {
+		guard let category else { return false }
+		let normalized = category
+			.trimmingCharacters(in: .whitespacesAndNewlines)
+			.folding(options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive],
+			         locale: Locale(identifier: "en_US_POSIX"))
+			.replacingOccurrences(of: "أ", with: "ا")
+			.replacingOccurrences(of: "إ", with: "ا")
+			.replacingOccurrences(of: "آ", with: "ا")
+		return normalized == "العاب" || normalized == "game" || normalized == "games"
+	}
+
+	func includes(_ item: BSAppItem) -> Bool {
+		switch self {
+		case .all: return true
+		case .applications: return !Self.isGame(category: item.app.category)
+		case .games: return Self.isGame(category: item.app.category)
+		}
+	}
+}
+
 struct BSAppsView: View {
-	var title: String = "Apps"
+	var title: String = "التطبيقات"
+	var scope: BSCatalogScope = .applications
 
 	@StateObject private var _viewModel = SourcesViewModel.shared
 
@@ -267,7 +296,7 @@ struct BSAppsView: View {
 
 		let key = _indexKey
 		if let cached = BSAppIndex.cached(for: key) {
-			_applyIndex(cached)
+			_applyIndex(cached.filter { scope.includes($0) })
 			return
 		}
 
@@ -276,7 +305,7 @@ struct BSAppsView: View {
 		if !items.isEmpty || sources.isEmpty {
 			BSAppIndex.cache(items, for: key)
 		}
-		_applyIndex(items)
+		_applyIndex(items.filter { scope.includes($0) })
 	}
 
 	/// Convert the catalogue to its search-only representation once, on the main
